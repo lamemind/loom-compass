@@ -1,0 +1,28 @@
+.ws-badge {
+    font-size: 0.7em;
+    font-weight: bold;
+    color: #ffffff;
+    background-color: #ff7043;
+    border-radius: 9px;
+    padding: 1px 6px;
+    margin-left: 3px;
+}
+
+/* Voce progetto loom — bottoni surface inline (T34 single-item) */
+.compass-dot {
+    padding-right: 4px;
+}
+.compass-surface-btn {
+    padding: 6px 8px;
+    border-radius: 4px;
+}
+.compass-surface-btn:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+.compass-chevron {
+    padding: 6px 6px;
+    border-radius: 4px;
+}
+.compass-chevron:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}

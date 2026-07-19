@@ -1,0 +1,71 @@
+#!/bin/bash
+# compass — bridge CLI dell'estensione Project Compass.
+#
+# Canale hook Claude Code → estensione GNOME (D-Bus):
+#   compass <running|ask|done|idle|end>
+#
+# Utility dev:
+#   compass reload    ricarica l'estensione (disable/enable, niente relogin)
+#
+# Lo stato viaggia keyed su $PTYXIS_PROFILE: l'estensione mappa profilo → sessione
+# e ne deriva il pallino di stato del progetto (rollup ask > done > running > idle).
+# Senza PTYXIS_PROFILE non c'è nulla da annunciare → exit silenzioso, così l'hook
+# non rompe le sessioni lanciate fuori da Ptyxis.
+#
+# NOTA: i sottocomandi di gestione registry (add / addable / sync / add-lane)
+# NON sono qui. Appartenevano al modello legacy `projects.json` e sono superseded
+# dal registry dconf /org/lamemind/loom/, popolato da `loom-works init`
+# (loom-works-plugin). Vedi README §Registry.
+
+set -euo pipefail
+
+UUID="compass@lamemind"
+
+# ── Hook di stato: annuncio D-Bus ────────────────────────────────────────────
+
+_compass_state() {
+    local state="$1"
+    local profile="${PTYXIS_PROFILE:-}"
+
+    [ -z "$profile" ] && exit 0
+
+    # `|| true`: se l'estensione è disabilitata il bus non risponde — un hook
+    # Claude non deve mai fallire per questo.
+    gdbus call --session \
+      --dest        org.lamemind.Compass \
+      --object-path /org/lamemind/Compass \
+      --method      org.lamemind.Compass.SetState \
+      "$profile" "$state" \
+      >/dev/null 2>&1 || true
+}
+
+# ── Reload: toggle dell'estensione ───────────────────────────────────────────
+# extension.js è uno stub-loader che re-importa impl.js con cache-busting a ogni
+# enable() → il toggle basta a rileggere il codice da disco, niente relogin.
+
+_compass_reload() {
+    echo "🔄 ricarico ${UUID}..."
+    gnome-extensions disable "$UUID" 2>/dev/null || true
+    sleep 0.3
+    gnome-extensions enable "$UUID" 2>/dev/null || true
+    echo "✅ Compass ricaricato."
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+
+cmd="${1:?uso: compass <running|ask|done|idle|end|reload>}"
+shift || true
+
+case "$cmd" in
+  running|ask|done|idle|end)
+    _compass_state "$cmd"
+    ;;
+  reload)
+    _compass_reload
+    ;;
+  *)
+    echo "compass: sottocomando sconosciuto: $cmd" >&2
+    echo "uso: compass <running|ask|done|idle|end|reload>" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,7 @@
+{
+  "name": "Project Compass",
+  "description": "Indicatore top-bar che mostra le sessioni Claude Code aperte e permette il focus cross-desktop su Wayland.",
+  "uuid": "compass@lamemind",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 1
+}

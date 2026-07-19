@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "Registry LEGACY, per-macchina. Copia questo file in projects.json e adattalo.",
+    "projects.json è gitignorato: contiene path di lavoro e UUID di profili Ptyxis locali.",
+    "Sostituito progressivamente dal registry dconf /org/lamemind/loom/ (vedi README §Registry).",
+    "I due blocchi coesistono: l'estensione legge prima questo file, poi il registry dconf."
+  ],
+  "projects": [
+    {
+      "id": "esempio-progetto",
+      "label": "🧵 LOCAL esempio-progetto",
+      "display": "🧵 esempio-progetto",
+      "profile": "00000000000000000000000000000000",
+      "dir": "~/dev/esempio-progetto",
+      "order": 10
+    }
+  ]
+}
