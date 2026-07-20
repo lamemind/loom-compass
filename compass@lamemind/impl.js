@@ -295,12 +295,14 @@ class CompassIndicator extends PanelMenu.Button {
     // progetto risulta assente. L'unico matcher che intercetta il progetto
     // QUALUNQUE tab sia in focus è il core emoji-agnostico `${owner} ${name}`
     // ("LOCAL loom-works"). Longest-match per disambiguare nomi che sono prefisso
-    // l'uno dell'altro. Ritorna Map(id → {win, deck}):
-    //  - `win`  = PRESENZA del progetto (core matcher) → guida fade/titolo + coalescing.
-    //  - `deck` = la stessa finestra SOLO se la tab ATTIVA è il deck (suffisso
-    //             `[deck]`). Serve al bottone 🎴 per scegliere focus (deck già
-    //             visibile) vs launch (apri la tab deck). NON è la presenza del
-    //             progetto — è il segnale d'azione della singola surface deck.
+    // l'uno dell'altro. Ritorna Map(id → {win}), dove `win` = PRESENZA del progetto
+    // (core matcher) → guida fade, focus del bottone-nome e coalescing delle tab.
+    //
+    // NON esiste più una presenza PER-SURFACE (c'era un campo `deck`, valorizzato solo
+    // quando la tab ATTIVA era il deck): la presenza è una proprietà del PROGETTO, e
+    // usarne una per-surface produceva il bug "faded + apre un deck nuovo mentre il
+    // progetto è già aperto sulla tab claude". I bottoni-emoji sono always-launch →
+    // non hanno bisogno di sapere quale surface sia visibile.
     _resolveLoomWindows() {
         const wins = this._getPtyxisWindows();
         const map  = new Map();
@@ -315,11 +317,9 @@ class CompassIndicator extends PanelMenu.Button {
                 }
             }
             if (!best) continue;
-            if (!map.has(best.id)) map.set(best.id, {win: null, deck: null});
+            if (!map.has(best.id)) map.set(best.id, {win: null});
             const e = map.get(best.id);
             if (!e.win) e.win = win;
-            if (!e.deck && title.includes(`${best.owner} ${best.name} [deck]`))
-                e.deck = win;
         }
         return map;
     }
@@ -356,16 +356,18 @@ class CompassIndicator extends PanelMenu.Button {
     //   dot   claude (emoji+title, →)    deck   chevron (solo se launch custom)
     //
     //  - dot           = pallino presenza (proxy dello stato finché il rollup live
-    //                    non esiste, Slice 3): finestra surface aperta → 🟢, else ⚪.
-    //  - claude btn    = emoji+nome, x_expand (riempie la riga) → focus/apre claude.
-    //  - deck btn      = emoji fissa 🎴 (solo se surface deck abilitata) → focus/apre deck.
+    //                    non esiste, Slice 3): finestra del progetto aperta → 🟢, else ⚪.
+    //  - name btn      = emoji+nome → focus del progetto se aperto, altrimenti lancia
+    //                    la surface default. L'UNICO focus-or-launch della riga.
+    //  - deck btn      = emoji fissa 🎴 (solo se surface deck abilitata) → always-launch.
     //  - chevron+menu  = SOLO se ci sono launch custom; il sotto-menu contiene
     //                    unicamente le voci launch (codium/idea/…).
     //
-    // Le surface tracked si aprono SENZA passare dal sotto-menu (bottoni inline);
-    // fade per-surface quando la finestra è chiusa (opacity, ripristino su hover).
+    // Le surface tracked si aprono SENZA passare dal sotto-menu (bottoni inline).
+    // Il fade (opacity 110, ripristino su hover) è di PROGETTO, non per-surface: sta
+    // su dot e bottone-nome, e solo quando il progetto non ha nessuna finestra aperta.
     _addLoomProject(project) {
-        const wins      = this._loomWins.get(project.id) ?? {win: null, deck: null};
+        const wins      = this._loomWins.get(project.id) ?? {win: null};
         const hasLaunch = project.launch.length > 0;
 
         if (hasLaunch) {
@@ -515,21 +517,19 @@ class CompassIndicator extends PanelMenu.Button {
             y_expand: true, y_align: Clutter.ActorAlign.FILL,
             can_focus: true, track_hover: true,
         });
+        // FOCUS-OR-LAUNCH a livello PROGETTO, non per-surface. La presenza è
+        // `wins.win` (match sul core `${owner} ${name}` → intercetta la finestra
+        // qualunque tab sia attiva): se il progetto ha una finestra aperta il click
+        // la focussa, A PRESCINDERE da quale surface ci sia dentro. Solo se non c'è
+        // NIENTE aperto il click lancia la surface default (e solo lì il bottone fada).
+        //
+        // Il bug che questo sostituisce: il bottone veniva wirato su `wins.deck`
+        // quando defaultSurface=deck, ma `wins.deck` è valorizzata SOLO se la tab
+        // ATTIVA è il deck → col claude in primo piano il progetto risultava assente
+        // (faded) e il click apriva un deck NUOVO invece di focussare la finestra.
+        // Stesso difetto in specchio sul ramo terminal: sempre launch, mai focus.
         const defKind = this._resolveDefaultSurface(project);
-        if (defKind === 'terminal') {
-            // standard launch: fire-once, sempre disponibile → nessun focus da
-            // consegnare, nessun fade (il terminale non è una presenza da fotografare).
-            nameBtn.connect('clicked', () => {
-                const ts = global.get_current_time();
-                this.menu.close();
-                this._launchTracked(project, 'terminal', ts);
-            });
-        } else {
-            // tracked (claude/deck): focus-or-launch. La finestra da cercare è
-            // quella della surface — wins.deck per il deck, wins.win per claude.
-            this._wireSurfaceButton(nameBtn, project, defKind,
-                defKind === 'deck' ? wins.deck : wins.win);
-        }
+        this._wireSurfaceButton(nameBtn, project, defKind, wins.win);
         row.add_child(nameBtn);
 
         // spacer — St.Widget vuoto che espande e mangia lo spazio tra il nome e il
@@ -568,8 +568,8 @@ class CompassIndicator extends PanelMenu.Button {
         // ALWAYS-LAUNCH, come 🤖: il click apre sempre un deck NUOVO, mai focus di
         // uno esistente. Ne segue che non fada mai (il fade a 110 significava "non
         // presente, il click lancia" — distinzione che qui non esiste più: il click
-        // lancia in ogni caso). Focus di un deck già aperto: bottone-nome, sui
-        // progetti con defaultSurface = deck.
+        // lancia in ogni caso). Per il focus c'è il bottone-nome, che consegna la
+        // finestra del progetto qualunque surface sia in primo piano.
         if (project.surfaces.includes('deck')) {
             const deckBtn = new St.Button({
                 style_class: 'compass-surface-btn',
@@ -629,13 +629,17 @@ class CompassIndicator extends PanelMenu.Button {
         return 'terminal';
     }
 
-    // Aggancia l'azione FOCUS-OR-LAUNCH a un bottone su surface tracked (claude/deck):
-    //  - finestra aperta → click = focus, opacità piena.
-    //  - nessuna finestra → click = apre (launchTracked); fade a 110 + ripristino su
-    //    hover, a segnalare "surface non presente, il click la lancia".
-    // Unico chiamante: il bottone-nome del cappello, sul kind già risolto da
-    // _resolveDefaultSurface → la surface è garantita lanciabile (abilitata, e bound
-    // se claude). I bottoni-emoji 🤖/🎴/🖥️ NON passano di qui: sono always-launch.
+    // Aggancia l'azione FOCUS-OR-LAUNCH al bottone-nome del cappello:
+    //  - `win` (finestra del PROGETTO, qualunque surface ci sia dentro) → click =
+    //    focus, opacità piena.
+    //  - nessuna finestra → click = lancia `kind`; fade a 110 + ripristino su hover,
+    //    a segnalare "progetto non presente, il click lo apre".
+    // `win` è la presenza del progetto, MAI quella della singola surface: focussare
+    // ciò che è aperto vale anche quando la surface dentro non è `kind`. `kind` conta
+    // solo nel ramo launch, ed è già risolto da _resolveDefaultSurface → garantito
+    // lanciabile (abilitato, e bound se claude), `terminal` incluso.
+    // Unico chiamante: il bottone-nome. I bottoni-emoji 🤖/🎴/🖥️ NON passano di qui:
+    // sono always-launch.
     _wireSurfaceButton(btn, project, kind, win) {
         if (win) {
             btn.connect('clicked', () => { this._focusWindow(win); this.menu.close(); });
