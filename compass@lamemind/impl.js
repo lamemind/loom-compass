@@ -207,6 +207,7 @@ class CompassIndicator extends PanelMenu.Button {
                     p.dir      = this._gvStr(kv.get('dir'))   ?? '';
                     p.surfaces = kv.has('surfaces') ? this._gvStrv(kv.get('surfaces')) : [];
                     p.docsRoot = this._gvStr(kv.get('docsRoot')) ?? null;
+                    p.defaultSurface = this._gvStr(kv.get('defaultSurface')) ?? null;
                 } else if ((m = g.match(/^projects\/([^/]+)\/launch\/(\d+)$/))) {
                     const p = get(m[1]);
                     p.launch.set(parseInt(m[2], 10), {
@@ -233,6 +234,7 @@ class CompassIndicator extends PanelMenu.Button {
                     dir:      p.dir,
                     surfaces: p.surfaces,
                     docsRoot: p.docsRoot, // sottocartella tasks.md (derivata dal file) → env deck
+                    defaultSurface: p.defaultSurface, // surface del bottone-nome; null → terminal
                     bindings: p.bindings, // {kind → uuid Ptyxis} per il launch tracked
                     label:    `${p.emoji} ${p.owner} ${p.name}`, // derivata, mai scritta
                     launch:   [...p.launch.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v),
@@ -497,36 +499,55 @@ class CompassIndicator extends PanelMenu.Button {
             item.connect('notify::hover', () => { dot.opacity = item.hover ? 255 : 110; });
         row.add_child(dot);
 
-        // claude — emoji + nome. Il bottone NON deve espandersi: St.Button (St.Bin)
-        // CENTRA la label interna se ha spazio extra (ignora x_align START) → col
-        // bottone che avvolge la label, il testo resta ancorato a sinistra, subito
-        // dopo il dot. Lo spazio verso deck/chevron lo mangia uno spacer (sotto).
-        const claudeLabel = new St.Label({
+        // bottone-nome (emoji + nome) — apre la SURFACE DEFAULT del progetto, non
+        // più claude hardcoded: la sceglie `defaultSurface` in .claude/loom-works.json
+        // (vedi _resolveDefaultSurface). Il bottone NON deve espandersi: St.Button
+        // (St.Bin) CENTRA la label interna se ha spazio extra (ignora x_align START)
+        // → col bottone che avvolge la label, il testo resta ancorato a sinistra,
+        // subito dopo il dot. Lo spazio verso i bottoni destri lo mangia uno spacer.
+        const nameLabel = new St.Label({
             text: `${project.emoji} ${project.name}`,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        const claudeBtn = new St.Button({
+        const nameBtn = new St.Button({
             style_class: 'compass-surface-btn',
-            child: claudeLabel,
+            child: nameLabel,
             y_expand: true, y_align: Clutter.ActorAlign.FILL,
             can_focus: true, track_hover: true,
         });
-        if (project.surfaces.includes('claude'))
-            this._wireSurfaceButton(claudeBtn, project, 'claude', wins.win);
-        else
-            claudeBtn.reactive = false;
-        row.add_child(claudeBtn);
+        const defKind = this._resolveDefaultSurface(project);
+        if (defKind === 'terminal') {
+            // standard launch: fire-once, sempre disponibile → nessun focus da
+            // consegnare, nessun fade (il terminale non è una presenza da fotografare).
+            nameBtn.connect('clicked', () => {
+                const ts = global.get_current_time();
+                this.menu.close();
+                this._launchTracked(project, 'terminal', ts);
+            });
+        } else {
+            // tracked (claude/deck): focus-or-launch. La finestra da cercare è
+            // quella della surface — wins.deck per il deck, wins.win per claude.
+            this._wireSurfaceButton(nameBtn, project, defKind,
+                defKind === 'deck' ? wins.deck : wins.win);
+        }
+        row.add_child(nameBtn);
 
-        // "nuova istanza claude" — bottone solo-emoji (come il deck 🎴). FORZA
-        // l'apertura di una nuova tab claude ANCHE se claude è già aperto: il
-        // bottone-nome qui sopra focussa la finestra esistente (focus-or-open),
-        // questo invece chiama SEMPRE _launchTracked → nuova tab nella project-window
-        // (coalescing), o nuova finestra se nessuna. Mostrato solo dove claude è
-        // abilitato E bound (serve un profilo UUID da lanciare).
+        // spacer — St.Widget vuoto che espande e mangia lo spazio tra il nome e il
+        // gruppo destro. NON è un bottone → non centra nulla, non intercetta click:
+        // dot+nome restano a sinistra, 🤖/🎴/🖥️+chevron finiscono a destra.
+        row.add_child(new St.Widget({x_expand: true}));
+
+        // claude 🤖 — bottone solo-emoji. FORZA l'apertura di una nuova tab claude
+        // ANCHE se claude è già aperto: dove il bottone-nome (se il default è claude)
+        // focussa la finestra esistente, questo chiama SEMPRE _launchTracked → nuova
+        // tab nella project-window (coalescing), o nuova finestra se nessuna. La
+        // distinzione focus-or-launch / always-launch resta anche ora che l'icona è
+        // identitaria (🤖) e non più un modificatore (➕). Mostrato solo dove claude
+        // è abilitato E bound (serve un profilo UUID da lanciare).
         if (project.surfaces.includes('claude') && project.bindings?.claude) {
             const newClaudeBtn = new St.Button({
                 style_class: 'compass-surface-btn',
-                label: '➕',
+                label: '🤖',
                 can_focus: true, track_hover: true,
                 y_expand: true, y_align: Clutter.ActorAlign.FILL,
             });
@@ -541,18 +562,14 @@ class CompassIndicator extends PanelMenu.Button {
             row.add_child(newClaudeBtn);
         }
 
-        // spacer — St.Widget vuoto che espande e mangia lo spazio tra il nome e
-        // deck/chevron. NON è un bottone → non centra nulla, non intercetta click:
-        // dot+nome restano a sinistra, deck+chevron finiscono a destra.
-        row.add_child(new St.Widget({x_expand: true}));
-
-        // deck — emoji fissa 🎴. Reso per OGNI progetto con la surface `deck`
-        // abilitata (non più gated sul profilo bound). Motivo: T25 fatta — loom-deck
-        // è ora GLOBALE (npm @lamemind/loom-deck, comando `loom-deck` nel PATH) →
-        // lanciabile in qualunque progetto, non solo dove esisteva un profilo Ptyxis
-        // col path locale. Click: finestra deck aperta → focus; altrimenti launch
-        // generico con cwd = project.dir (vedi _launchTracked). Claude invece porta
-        // anche emoji+nome (titolo del progetto).
+        // deck 🎴 — reso per OGNI progetto con la surface `deck` abilitata (non
+        // gated sul profilo bound): T25 fatta, loom-deck è GLOBALE (npm
+        // @lamemind/loom-deck, comando `loom-deck` nel PATH) → lanciabile ovunque.
+        // ALWAYS-LAUNCH, come 🤖: il click apre sempre un deck NUOVO, mai focus di
+        // uno esistente. Ne segue che non fada mai (il fade a 110 significava "non
+        // presente, il click lancia" — distinzione che qui non esiste più: il click
+        // lancia in ogni caso). Focus di un deck già aperto: bottone-nome, sui
+        // progetti con defaultSurface = deck.
         if (project.surfaces.includes('deck')) {
             const deckBtn = new St.Button({
                 style_class: 'compass-surface-btn',
@@ -560,10 +577,11 @@ class CompassIndicator extends PanelMenu.Button {
                 can_focus: true, track_hover: true,
                 y_expand: true, y_align: Clutter.ActorAlign.FILL,
             });
-            // deck-specific (wins.deck), NON wins.win: se il deck non è la tab
-            // visibile, il bottone deve LANCIARLO (coalesce nella project-window),
-            // non limitarsi a focussare claude.
-            this._wireSurfaceButton(deckBtn, project, 'deck', wins.deck);
+            deckBtn.connect('clicked', () => {
+                const ts = global.get_current_time();
+                this.menu.close();
+                this._launchTracked(project, 'deck', ts);
+            });
             row.add_child(deckBtn);
         }
 
@@ -589,27 +607,47 @@ class CompassIndicator extends PanelMenu.Button {
         return row;
     }
 
-    // Aggancia l'azione a un bottone surface tracked (claude/deck):
-    //  - finestra aperta              → click = focus.
-    //  - deck (globale) o claude bound → click = apre (launchTracked); fade + hover.
-    //  - claude senza binding          → inerte.
-    // deck non richiede binding: è globale (comando `loom-deck` nel PATH, T25) →
-    // lanciabile in qualunque progetto con cwd = project.dir (vedi _launchTracked).
+    // Surface aperta dal bottone-nome del cappello. Legge `defaultSurface` dal
+    // registry (derivato da .claude/loom-works.json) e la RISOLVE contro lo stato
+    // reale del progetto: il campo dichiara un'intenzione, non una garanzia.
+    //
+    // FALLBACK A `terminal` — il default in assenza di configurazione, e la rete di
+    // sicurezza quando la surface richiesta non è lanciabile qui (disabilitata in
+    // `surfaces`, o claude senza binding UUID). Motivo: `terminal` è l'unica surface
+    // built-in universale, senza gate di enablement e senza binding → è l'unica che
+    // non può a sua volta risolvere nel vuoto. Così il bottone-nome non è MAI inerte.
+    //
+    // La coerenza `defaultSurface` ↔ `surfaces` non è imposta a monte (cfg_validate
+    // rifiuta solo i valori fuori enum): disabilitare una surface è un'operazione
+    // legittima e non deve invalidare l'intera config del progetto. Qui degrada.
+    _resolveDefaultSurface(project) {
+        const want = project.defaultSurface;
+        if (want === 'claude' && project.surfaces.includes('claude') && project.bindings?.claude)
+            return 'claude';
+        if (want === 'deck' && project.surfaces.includes('deck'))
+            return 'deck'; // deck globale (T25): nessun binding richiesto
+        return 'terminal';
+    }
+
+    // Aggancia l'azione FOCUS-OR-LAUNCH a un bottone su surface tracked (claude/deck):
+    //  - finestra aperta → click = focus, opacità piena.
+    //  - nessuna finestra → click = apre (launchTracked); fade a 110 + ripristino su
+    //    hover, a segnalare "surface non presente, il click la lancia".
+    // Unico chiamante: il bottone-nome del cappello, sul kind già risolto da
+    // _resolveDefaultSurface → la surface è garantita lanciabile (abilitata, e bound
+    // se claude). I bottoni-emoji 🤖/🎴/🖥️ NON passano di qui: sono always-launch.
     _wireSurfaceButton(btn, project, kind, win) {
         if (win) {
             btn.connect('clicked', () => { this._focusWindow(win); this.menu.close(); });
-        } else if (kind === 'deck' || (project.bindings && project.bindings[kind])) {
-            btn.opacity = 110;
-            btn.connect('notify::hover', () => { btn.opacity = btn.hover ? 255 : 110; });
-            btn.connect('clicked', () => {
-                const ts = global.get_current_time();
-                this.menu.close();
-                this._launchTracked(project, kind, ts);
-            });
-        } else {
-            btn.reactive = false;
-            btn.opacity  = 90;
+            return;
         }
+        btn.opacity = 110;
+        btn.connect('notify::hover', () => { btn.opacity = btn.hover ? 255 : 110; });
+        btn.connect('clicked', () => {
+            const ts = global.get_current_time();
+            this.menu.close();
+            this._launchTracked(project, kind, ts);
+        });
     }
 
     // Apre una surface tracked (claude/deck) col profilo bound. Il custom-command
