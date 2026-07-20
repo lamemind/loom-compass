@@ -567,6 +567,24 @@ class CompassIndicator extends PanelMenu.Button {
             row.add_child(deckBtn);
         }
 
+        // terminal — surface STANDARD LAUNCH: built-in e universale (ogni progetto
+        // loom ce l'ha, senza dichiararla in `launch[]`), ma di natura launch —
+        // fire-once, nessuno stato, nessun contributo al rollup del pallino.
+        // Sempre presente e sempre piena opacità: non è una presenza da fotografare,
+        // è un'azione ("apri un terminale qui"), quindi niente fade.
+        const termBtn = new St.Button({
+            style_class: 'compass-surface-btn',
+            label: '🖥️',
+            can_focus: true, track_hover: true,
+            y_expand: true, y_align: Clutter.ActorAlign.FILL,
+        });
+        termBtn.connect('clicked', () => {
+            const ts = global.get_current_time();
+            this.menu.close();
+            this._launchTracked(project, 'terminal', ts);
+        });
+        row.add_child(termBtn);
+
         item.add_child(row);
         return row;
     }
@@ -620,8 +638,9 @@ class CompassIndicator extends PanelMenu.Button {
     _launchTracked(project, kind, ts) {
         try {
             const uuid = project.bindings?.[kind];
-            // deck: lanciabile senza profilo (comando globale). claude: serve il binding.
-            if (kind !== 'deck' && !uuid) return;
+            // deck (comando globale) e terminal (nessun comando: È la shell) si
+            // lanciano senza profilo. claude: serve il binding.
+            if (kind !== 'deck' && kind !== 'terminal' && !uuid) return;
             const home = GLib.get_home_dir();
             let dir = project.dir || home;
             if (dir.startsWith('~')) dir = home + dir.slice(1);
@@ -642,6 +661,24 @@ class CompassIndicator extends PanelMenu.Button {
                     argv = newWindow
                         ? ['ptyxis', '--new-window', '-d', dir, '--', 'bash', '-lc', inner, 'bash', title]
                         : ['ptyxis', '--tab',        '-d', dir, '--', 'bash', '-lc', inner, 'bash', title];
+                } else if (kind === 'terminal') {
+                    // Nessun `-- CMD`: l'azione È aprire la shell, non eseguirci
+                    // dentro un comando (differenza dalle launch custom, che invece
+                    // spawnano `bash -ic <command>`).
+                    //
+                    // `-T <title>` = titolo di tab Ptyxis col core `<owner> <name>`,
+                    // così la finestra continua a matchare il progetto anche mentre
+                    // la tab attiva è il terminale (il match è window-level e legge
+                    // il titolo della tab ATTIVA: una tab senza label farebbe
+                    // sparire il progetto dal radar e spingerebbe il prossimo lancio
+                    // claude in una finestra nuova invece che come tab qui).
+                    // Se Ptyxis lasciasse vincere l'OSC 0 di `__vte_precmd`
+                    // (/etc/profile.d/vte.sh riscrive il titolo a ogni prompt) si
+                    // degrada al caso senza titolo: la surface resta funzionante.
+                    const title = `🖥️ ${project.owner} ${project.name} [term]`;
+                    argv = newWindow
+                        ? ['ptyxis', '--new-window', '-T', title, '-d', dir]
+                        : ['ptyxis', '--tab',        '-T', title, '-d', dir];
                 } else {
                     argv = newWindow
                         ? ['ptyxis', '--new-window', `--tab-with-profile=${uuid}`, '-d', dir]
