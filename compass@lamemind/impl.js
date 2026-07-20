@@ -328,58 +328,19 @@ class CompassIndicator extends PanelMenu.Button {
         this.menu.removeAll();
         this._winMap = this._resolveWindowMap(); // cache usata anche da _findWindowForProject
 
-        for (const project of this._registry) {
-            const win     = this._winMap.get(project.profile) ?? null;
-            const session = this._sessions.get(project.profile) ?? {state: 'idle', seen: true};
-            const emoji   = STATE_EMOJI[session.state] ?? '⚪';
-            const text    = `${emoji}  ${project.display ?? project.label}`;
+        // Il blocco legacy (projects.json) NON viene più renderizzato: le sue voci
+        // duplicavano i cappelli loom. `_registry` resta caricato perché serve
+        // ancora a risolvere finestre/sessioni per profilo (_resolveWindowMap,
+        // hook D-Bus keyed su PTYXIS_PROFILE).
 
-            const item = new PopupMenu.PopupMenuItem(text);
+        // ── Registry loom (dconf) — unica sorgente del menu ───────────────────
+        this._loomWins = this._resolveLoomWindows();
+        for (const project of this._loomRegistry) this._addLoomProject(project);
 
-            if (win) {
-                item.connect('activate', () => {
-                    this._focusWindow(win);
-                    // Click = "vista": segna seen e azzera il badge. Reset emoji a
-                    // ⚪ idle SALVO running (🟢) e done (✅), che restano a dare
-                    // contesto (sessione attiva / conclusa). Il prossimo hook
-                    // ridipinge comunque lo stato reale.
-                    const s = this._sessions.get(project.profile);
-                    if (s) {
-                        s.seen = true;
-                        if (s.state !== 'running' && s.state !== 'done')
-                            s.state = 'idle';
-                    }
-                    this._updateBadge();
-                    this.menu.close();
-                });
-            } else {
-                // Sessione chiusa: voce attenuata ma cliccabile → riapre
-                // finestra Ptyxis (profilo + dir) e lancia `claude --name`.
-                // Dim via actor opacity (0–255): St ignora `opacity` da CSS.
-                item.opacity = 110;
-                item.connect('enter-event', () => { item.opacity = 255; });
-                item.connect('leave-event', () => { item.opacity = 110; });
-                item.connect('activate', () => {
-                    this._launchSession(project);
-                    this.menu.close();
-                });
-            }
-
-            this.menu.addMenuItem(item);
-        }
-
-        if (this._registry.length === 0) {
+        if (this._loomRegistry.length === 0) {
             const empty = new PopupMenu.PopupMenuItem('— registry vuoto —');
             empty.setSensitive(false);
             this.menu.addMenuItem(empty);
-        }
-
-        // ── Blocco NUOVO (T34): registry loom (dconf) — additivo, coesistenza ─
-        // Sotto un separatore, indipendente dal blocco vecchio (projects.json).
-        this._loomWins = this._resolveLoomWindows();
-        if (this._loomRegistry.length > 0) {
-            this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-            for (const project of this._loomRegistry) this._addLoomProject(project);
         }
 
 
