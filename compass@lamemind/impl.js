@@ -208,6 +208,9 @@ class CompassIndicator extends PanelMenu.Button {
                     p.surfaces = kv.has('surfaces') ? this._gvStrv(kv.get('surfaces')) : [];
                     p.docsRoot = this._gvStr(kv.get('docsRoot')) ?? null;
                     p.defaultSurface = this._gvStr(kv.get('defaultSurface')) ?? null;
+                    // order: int32 nel dump ("50", non quotato) → parse numerico diretto
+                    const ord = parseInt(kv.get('order'), 10);
+                    p.order = Number.isFinite(ord) ? ord : null;
                 } else if ((m = g.match(/^projects\/([^/]+)\/launch\/(\d+)$/))) {
                     const p = get(m[1]);
                     p.launch.set(parseInt(m[2], 10), {
@@ -235,11 +238,14 @@ class CompassIndicator extends PanelMenu.Button {
                     surfaces: p.surfaces,
                     docsRoot: p.docsRoot, // sottocartella tasks.md (derivata dal file) → env deck
                     defaultSurface: p.defaultSurface, // surface del bottone-nome; null → terminal
+                    order:    p.order, // posizione nel blocco loom; null → coda alfabetica
                     bindings: p.bindings, // {kind → uuid Ptyxis} per il launch tracked
                     label:    `${p.emoji} ${p.owner} ${p.name}`, // derivata, mai scritta
                     launch:   [...p.launch.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v),
                 }))
-                .sort((a, b) => a.id.localeCompare(b.id));
+                // gap-by-10 come il blocco vecchio; senza-order in coda, alfabetici (stabile)
+                .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)
+                    || a.id.localeCompare(b.id));
         } catch (e) {
             logError(e, '[Compass] _loadLoomRegistry');
         }
