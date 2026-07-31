@@ -43,6 +43,19 @@ const STATE_EMOJI = {
     error:   '🔴',
 };
 
+// ── Surface → emoji ──────────────────────────────────────────────────────────
+//
+// Emoji cablate delle due surface che spawnano una tab SENZA emoji di progetto.
+// Punto UNICO: le stesse stringhe entrano nel titolo che spawniamo (`🎴 <name>
+// [deck]`) e nella chiave con cui `_resolveLoomWindows` riconosce quel titolo —
+// se divergessero, la tab resterebbe invisibile al matcher.
+// La surface `claude` non è qui: le sue tab portano l'emoji del PROGETTO, che
+// arriva dal registry per-progetto (`p.emoji`), non da una costante.
+const SURFACE_EMOJI = {
+    deck:     '🎴',
+    terminal: '🖥️',
+};
+
 // ── Implementazione servizio D-Bus ───────────────────────────────────────────
 
 class CompassService {
@@ -202,7 +215,6 @@ class CompassIndicator extends PanelMenu.Button {
                 if ((m = g.match(/^projects\/([^/]+)$/))) {
                     const p = get(m[1]);
                     p.emoji    = this._gvStr(kv.get('emoji')) ?? '';
-                    p.owner    = this._gvStr(kv.get('owner')) ?? '';
                     p.name     = this._gvStr(kv.get('name'))  ?? m[1];
                     p.dir      = this._gvStr(kv.get('dir'))   ?? '';
                     p.surfaces = kv.has('surfaces') ? this._gvStrv(kv.get('surfaces')) : [];
@@ -232,7 +244,6 @@ class CompassIndicator extends PanelMenu.Button {
                 .map(p => ({
                     id:       p.id,
                     emoji:    p.emoji,
-                    owner:    p.owner,
                     name:     p.name,
                     dir:      p.dir,
                     surfaces: p.surfaces,
@@ -240,7 +251,7 @@ class CompassIndicator extends PanelMenu.Button {
                     defaultSurface: p.defaultSurface, // surface del bottone-nome; null → terminal
                     order:    p.order, // posizione nel blocco loom; null → coda alfabetica
                     bindings: p.bindings, // {kind → uuid Ptyxis} per il launch tracked
-                    label:    `${p.emoji} ${p.owner} ${p.name}`, // derivata, mai scritta
+                    label:    `${p.emoji} ${p.name}`, // derivata, mai scritta
                     launch:   [...p.launch.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v),
                 }))
                 // gap-by-10 come il blocco vecchio; senza-order in coda, alfabetici (stabile)
@@ -290,19 +301,30 @@ class CompassIndicator extends PanelMenu.Button {
     }
 
     // Risoluzione finestra a livello PROGETTO (T34). Fix del sintomo "focus sulla
-    // tab deck → il progetto appare faded/spento": le surface (claude, deck) sono
-    // TAB, non finestre distinte — col coalescing vivono nella STESSA finestra
-    // Ptyxis, il cui titolo = quello della tab ATTIVA. I titoli surface hanno
-    // emoji/suffisso diversi ma condividono il core `${owner} ${name}`:
-    //    claude → `🧵 LOCAL loom-works`
-    //    deck   → `🎴 LOCAL loom-works [deck]`
-    // Matchare sulla label piena (con emoji 🧵) o sul suffisso `[deck]` è
-    // PER-SURFACE → quando è attiva la tab deck la label claude non matcha e il
-    // progetto risulta assente. L'unico matcher che intercetta il progetto
-    // QUALUNQUE tab sia in focus è il core emoji-agnostico `${owner} ${name}`
-    // ("LOCAL loom-works"). Longest-match per disambiguare nomi che sono prefisso
-    // l'uno dell'altro. Ritorna Map(id → {win}), dove `win` = PRESENZA del progetto
-    // (core matcher) → guida fade, focus del bottone-nome e coalescing delle tab.
+    // tab deck → il progetto appare faded/spento": le surface (claude, deck,
+    // terminal) sono TAB, non finestre distinte — col coalescing vivono nella
+    // STESSA finestra Ptyxis, il cui titolo = quello della tab ATTIVA. Ogni
+    // surface titola con la PROPRIA emoji davanti allo stesso `name`:
+    //    claude   → `🧵 loom-works · T52`
+    //    deck     → `🎴 loom-works [deck]`
+    //    terminal → `🖥️ loom-works [term]`
+    // Matchare una sola di queste chiavi sarebbe PER-SURFACE → col deck in focus
+    // la chiave claude non scatta e il progetto risulta assente. Il matcher accetta
+    // quindi un INSIEME di chiavi, una per surface (T58): basta che il titolo ne
+    // contenga una. Ciò che segue (`· T52`, `[deck]`, `· fork`) non partecipa.
+    //
+    // L'emoji È l'entropia contro i falsi positivi: sul solo `name` una finestra
+    // estranea che nomini "loom-works" matcherebbe, su `🧵 loom-works` no. (Prima
+    // di T58 quell'entropia la portava l'`owner`, che era il core comune ai titoli.)
+    //
+    // Longest-match sul `name`, NON sulla chiave: le chiavi differiscono per la
+    // larghezza dell'emoji e `🖥️` porta un VS16 (U+FE0F, code point invisibile in
+    // più) → confrontare la lunghezza della chiave falserebbe la disambiguazione
+    // fra progetti con nomi in relazione di prefisso (`trading-java` vs
+    // `trading-java-engine`).
+    //
+    // Ritorna Map(id → {win}), dove `win` = PRESENZA del progetto → guida fade,
+    // focus del bottone-nome e coalescing delle tab.
     //
     // NON esiste più una presenza PER-SURFACE (c'era un campo `deck`, valorizzato solo
     // quando la tab ATTIVA era il deck): la presenza è una proprietà del PROGETTO, e
@@ -316,11 +338,12 @@ class CompassIndicator extends PanelMenu.Button {
             const title = win.get_title() ?? '';
             let best = null, bestLen = 0;
             for (const p of this._loomRegistry) {
-                const key = `${p.owner} ${p.name}`;
-                if (title.includes(key) && key.length > bestLen) {
-                    bestLen = key.length;
-                    best    = p;
-                }
+                if (p.name.length <= bestLen) continue;
+                const keys = [p.emoji, SURFACE_EMOJI.deck, SURFACE_EMOJI.terminal]
+                    .map(e => `${e} ${p.name}`);
+                if (!keys.some(k => title.includes(k))) continue;
+                bestLen = p.name.length;
+                best    = p;
             }
             if (!best) continue;
             if (!map.has(best.id)) map.set(best.id, {win: null});
@@ -491,7 +514,7 @@ class CompassIndicator extends PanelMenu.Button {
         //
         // FADE DI PRESENZA (stessa regola dei bottoni surface e del blocco vecchio):
         // il pallino segue lo stato aperto/chiuso del progetto. Nessuna finestra col
-        // match nome (`wins.win == null`, cioè nessun titolo col core `${owner} ${name}`)
+        // match nome (`wins.win == null`, cioè nessun titolo con una chiave dell'emoji-set)
         // → dot attenuato (opacity 110); finestra aperta → pieno (255). Ripristino su
         // hover della riga — `item.hover` è true anche col puntatore sopra i bottoni
         // figli (niente flicker). Lo STATO (emoji del rollup) NON cambia: varia solo
@@ -524,7 +547,7 @@ class CompassIndicator extends PanelMenu.Button {
             can_focus: true, track_hover: true,
         });
         // FOCUS-OR-LAUNCH a livello PROGETTO, non per-surface. La presenza è
-        // `wins.win` (match sul core `${owner} ${name}` → intercetta la finestra
+        // `wins.win` (match sull'emoji-set + `name` → intercetta la finestra
         // qualunque tab sia attiva): se il progetto ha una finestra aperta il click
         // la focussa, A PRESCINDERE da quale surface ci sia dentro. Solo se non c'è
         // NIENTE aperto il click lancia la surface default (e solo lì il bottone fada).
@@ -579,7 +602,7 @@ class CompassIndicator extends PanelMenu.Button {
         if (project.surfaces.includes('deck')) {
             const deckBtn = new St.Button({
                 style_class: 'compass-surface-btn',
-                label: '🎴',
+                label: SURFACE_EMOJI.deck,
                 can_focus: true, track_hover: true,
                 y_expand: true, y_align: Clutter.ActorAlign.FILL,
             });
@@ -598,7 +621,7 @@ class CompassIndicator extends PanelMenu.Button {
         // è un'azione ("apri un terminale qui"), quindi niente fade.
         const termBtn = new St.Button({
             style_class: 'compass-surface-btn',
-            label: '🖥️',
+            label: SURFACE_EMOJI.terminal,
             can_focus: true, track_hover: true,
             y_expand: true, y_align: Clutter.ActorAlign.FILL,
         });
@@ -698,12 +721,12 @@ class CompassIndicator extends PanelMenu.Button {
                 if (kind === 'deck') {
                     // deck GLOBALE (T25): niente profilo per-progetto col path locale.
                     // Lancio generico `loom-deck` (nel PATH) con cwd = project.dir e
-                    // titolo matchabile `<owner> <name> [deck]` via OSC 0 (canale
+                    // titolo matchabile `🎴 <name> [deck]` via OSC 0 (canale
                     // autoritativo, come deck-run). docs-root non-standard (es.
                     // loom-works=runtime) passata via env SOLO se nel registry
                     // (project.docsRoot ← file loom-works.json → reg_pull). `exec bash`
                     // tiene viva la tab all'uscita del deck (come il vecchio profilo).
-                    const title = `🎴 ${project.owner} ${project.name} [deck]`;
+                    const title = `${SURFACE_EMOJI.deck} ${project.name} [deck]`;
                     const envp  = project.docsRoot ? `LOOM_DECK_DOCS_ROOT=${project.docsRoot} ` : '';
                     const inner = `printf '\\033]0;%s\\007' "$1"; ${envp}loom-deck; exec bash`;
                     argv = newWindow
@@ -714,7 +737,7 @@ class CompassIndicator extends PanelMenu.Button {
                     // dentro un comando (differenza dalle launch custom, che invece
                     // spawnano `bash -ic <command>`).
                     //
-                    // `-T <title>` = titolo di tab Ptyxis col core `<owner> <name>`,
+                    // `-T <title>` = titolo di tab Ptyxis con la chiave `🖥️ <name>`,
                     // così la finestra continua a matchare il progetto anche mentre
                     // la tab attiva è il terminale (il match è window-level e legge
                     // il titolo della tab ATTIVA: una tab senza label farebbe
@@ -723,7 +746,7 @@ class CompassIndicator extends PanelMenu.Button {
                     // Se Ptyxis lasciasse vincere l'OSC 0 di `__vte_precmd`
                     // (/etc/profile.d/vte.sh riscrive il titolo a ogni prompt) si
                     // degrada al caso senza titolo: la surface resta funzionante.
-                    const title = `🖥️ ${project.owner} ${project.name} [term]`;
+                    const title = `${SURFACE_EMOJI.terminal} ${project.name} [term]`;
                     argv = newWindow
                         ? ['ptyxis', '--new-window', '-T', title, '-d', dir]
                         : ['ptyxis', '--tab',        '-T', title, '-d', dir];
@@ -740,7 +763,7 @@ class CompassIndicator extends PanelMenu.Button {
             };
 
             // Finestra del progetto già aperta (una qualsiasi surface: match sul core
-            // `${owner} ${name}` → intercetta la finestra qualunque tab sia attiva).
+            // emoji-set + `name` → intercetta la finestra qualunque tab sia attiva).
             // Re-risolvo fresh al click per catturare lo stato reale nell'istante dell'azione.
             const projWin = this._resolveLoomWindows().get(project.id)?.win ?? null;
             if (!projWin) { spawnTab(true); return; } // nessuna finestra → creane la prima

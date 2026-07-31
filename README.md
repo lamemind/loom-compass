@@ -90,8 +90,8 @@ Ptyxis, roba per-macchina che non appartiene a un repo pubblico. Il modello è
 
 Il layer loom è la direzione: l'identità del progetto sta in un file committabile
 nel repo del progetto (`.claude/loom-works.json`), da cui `loom-works init`
-**registra** il progetto nel registry dconf. La `label` di match è **derivata**
-(`{emoji} {owner} {name}`), mai scritta a mano in più posti.
+**registra** il progetto nel registry dconf. Le chiavi di match sono **derivate**
+(`{emoji} {name}`, una per surface), mai scritte a mano in più posti.
 
 ### Come compass legge dconf
 
