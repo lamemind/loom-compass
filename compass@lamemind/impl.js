@@ -891,10 +891,13 @@ class CompassIndicator extends PanelMenu.Button {
         // se è un binding di un cappello loom (dconf). Così lo stato via D-Bus popola
         // _sessions anche per i progetti loom-only (non più in projects.json) → il
         // loro pallino segue lo stato reale. _sessions resta keyed su profile UUID.
-        const isLoomBinding = this._loomRegistry.some(
+        // Il cappello loom si tiene come OGGETTO, non come bool: oltre a decidere se
+        // il profilo è conosciuto serve a notificare (displayName) e a risolvere la
+        // finestra col matcher nuovo — vedi _findNotificationWindow.
+        const loomProject = this._loomRegistry.find(
             p => Object.values(p.bindings ?? {}).includes(profileId)
         );
-        if (!project && !isLoomBinding) return; // sconosciuto a entrambi → ignora
+        if (!project && !loomProject) return; // sconosciuto a entrambi → ignora
 
         const prev      = this._sessions.get(profileId) ?? {state: 'idle', seen: true};
         const prevState = prev.state;
@@ -913,16 +916,17 @@ class CompassIndicator extends PanelMenu.Button {
         prev.seen  = !(state === 'ask' || state === 'done');
         this._sessions.set(profileId, prev);
 
-        // Suono + notifica (solo su transizione, non su ripetizione). Ristretto al
-        // registry vecchio: il path notifica usa project.display/profile (shape
-        // projects.json). I cappelli loom aggiornano comunque il pallino via il
-        // _buildMenu qui sotto (rollup da _sessions).
-        if (project) {
+        // Suono + notifica (solo su transizione, non su ripetizione). Vale per
+        // ENTRAMBI i registry: prima era ristretta a projects.json, quindi un
+        // progetto loom-only (registrato in dconf, uscito dal file legacy) su `ask`
+        // non riceveva né bell né notifica — restava il solo pallino nel menu, che
+        // però lo vedi solo se il menu lo apri.
+        if (project || loomProject) {
             if (state === 'done' && prevState !== 'done') {
                 this._playSound('complete');
             } else if (state === 'ask' && prevState !== 'ask') {
                 this._playSound('bell');
-                this._showNotification(project);
+                this._showNotification(project, loomProject);
             }
         }
 
@@ -972,9 +976,31 @@ class CompassIndicator extends PanelMenu.Button {
         return this._notificationSource;
     }
 
-    _showNotification(project) {
+    // Finestra da focussare al click su "Vai".
+    //
+    // Il matcher LEGACY (_resolveWindowMap, keyed sul campo `label` di projects.json)
+    // non aggancia più niente: da T58 (titoli tab senza owner) il titolo di una tab è
+    // `{emoji} {name}` — `🧵 loom-works · T74` — mentre projects.json porta ancora
+    // l'owner dentro la label — `🧵 LOCAL loom-works`. `title.includes(label)` è quindi
+    // sempre falso → win null → il bottone "Vai" restava INERTE, e in silenzio: il null
+    // moriva dentro `if (win)`, nessun errore, nessun log.
+    // Priorità perciò al matcher loom (insieme di chiavi per-surface); il legacy resta
+    // come fallback per i progetti che vivono solo in projects.json.
+    _findNotificationWindow(project, loomProject) {
+        if (loomProject) {
+            // Risoluzione FRESCA, non la cache `_loomWins` di _buildMenu: una notifica
+            // resta nello shade finché non la chiudi, quindi fra la sua comparsa e il
+            // click possono passare decine di minuti — nel frattempo la finestra può
+            // essere stata chiusa, riaperta o rititolata.
+            const win = this._resolveLoomWindows().get(loomProject.id)?.win;
+            if (win) return win;
+        }
+        return project ? this._findWindowForProject(project) : null;
+    }
+
+    _showNotification(project, loomProject) {
         const source      = this._getOrCreateSource();
-        const displayName = project.display ?? project.label;
+        const displayName = loomProject?.label ?? project.display ?? project.label;
 
         let notification;
         try {
@@ -991,8 +1017,20 @@ class CompassIndicator extends PanelMenu.Button {
 
         try {
             notification.addAction('Vai', () => {
-                const win = this._findWindowForProject(project);
-                if (win) this._focusWindow(win);
+                // `ts` catturato QUI, non dentro _focusWindow: la chiusura del banner
+                // può far arrivare l'activate fuori dal contesto dell'evento, e con un
+                // timestamp corrente/0 la focus-stealing-prevention di Mutter lo scarta
+                // (stesso vincolo del click sul bottone-nome, §Coalescing).
+                const ts  = global.get_current_time();
+                const win = this._findNotificationWindow(project, loomProject);
+                // Log sul MISS: senza, un matcher che non aggancia più è indistinguibile
+                // da un bottone che non fa niente — è esattamente così che il difetto
+                // sopra è passato inosservato.
+                if (!win) {
+                    log(`[Compass] "Vai": nessuna finestra per ${displayName}`);
+                    return;
+                }
+                this._focusWindow(win, ts);
             });
         } catch (_e) {}
 
