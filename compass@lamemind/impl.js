@@ -45,16 +45,37 @@ const STATE_EMOJI = {
 
 // ── Surface → emoji ──────────────────────────────────────────────────────────
 //
-// Emoji cablate delle due surface che spawnano una tab SENZA emoji di progetto.
-// Punto UNICO: le stesse stringhe entrano nel titolo che spawniamo (`🎴 <name>
-// [deck]`) e nella chiave con cui `_resolveLoomWindows` riconosce quel titolo —
-// se divergessero, la tab resterebbe invisibile al matcher.
+// Emoji cablate delle due surface che spawnano una tab SENZA emoji di progetto:
+// entrano nel titolo che spawniamo (`🎴 <name> [deck]`) e nei bottoni della riga.
+// NON sono più una chiave del matcher — `titleKeyRe` accetta qualunque emoji →
+// cambiarle qui non può rendere una tab invisibile.
 // La surface `claude` non è qui: le sue tab portano l'emoji del PROGETTO, che
 // arriva dal registry per-progetto (`p.emoji`), non da una costante.
 const SURFACE_EMOJI = {
     deck:     '🎴',
     terminal: '🖥️',
 };
+
+// ── Chiave di titolo → progetto ──────────────────────────────────────────────
+//
+// `<emoji> <name>` in testa al titolo, con emoji GENERICA: le tab di una voce
+// `launch[]` portano l'emoji custom del registry, sconosciuta a qualunque
+// costante. La classe copre anche le sequenze (VS16, ZWJ, skin-tone), che sono
+// più code point pittografici concatenati.
+// Perché `^` e perché `(?![\w-])`: commento di `_resolveLoomWindows`.
+// Cache: il matcher gira su ogni finestra × ogni progetto a ogni apertura menu,
+// e la regex dipende dal solo `name`.
+const EMOJI_HEAD = '[\\p{Extended_Pictographic}\\uFE0F\\u200D\\u{1F3FB}-\\u{1F3FF}]+';
+const _titleKeyCache = new Map();
+function titleKeyRe(name) {
+    let re = _titleKeyCache.get(name);
+    if (!re) {
+        const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        re = new RegExp(`^${EMOJI_HEAD} ${esc}(?![\\w-])`, 'u');
+        _titleKeyCache.set(name, re);
+    }
+    return re;
+}
 
 // ── Implementazione servizio D-Bus ───────────────────────────────────────────
 
@@ -308,20 +329,28 @@ class CompassIndicator extends PanelMenu.Button {
     //    claude   → `🧵 loom-works · T52`
     //    deck     → `🎴 loom-works [deck]`
     //    terminal → `🖥️ loom-works [term]`
-    // Matchare una sola di queste chiavi sarebbe PER-SURFACE → col deck in focus
-    // la chiave claude non scatta e il progetto risulta assente. Il matcher accetta
-    // quindi un INSIEME di chiavi, una per surface (T58): basta che il titolo ne
-    // contenga una. Ciò che segue (`· T52`, `[deck]`, `· fork`) non partecipa.
+    // Matchare una sola di queste emoji sarebbe PER-SURFACE → col deck in focus
+    // la chiave claude non scatta e il progetto risulta assente. Un insieme chiuso
+    // di emoji note non basta neanche: una voce `launch[]` che spawna una tab porta
+    // la PROPRIA emoji custom dal registry (`🔌 ud-code [ssh247]`), che nessuna
+    // costante conosce. Il matcher accetta quindi QUALUNQUE emoji in testa
+    // (`\p{Extended_Pictographic}`, più VS16/ZWJ/skin-tone per le sequenze), seguita
+    // dal `name`. Ciò che segue (`· T52`, `[deck]`, `· fork`) non partecipa.
     //
-    // L'emoji È l'entropia contro i falsi positivi: sul solo `name` una finestra
-    // estranea che nomini "loom-works" matcherebbe, su `🧵 loom-works` no. (Prima
-    // di T58 quell'entropia la portava l'`owner`, che era il core comune ai titoli.)
+    // L'emoji resta l'entropia contro i falsi positivi anche da generica, perché
+    // l'ancora `^` la rende obbligatoria: `vim ud-code/foo.js` non inizia con
+    // emoji+spazio → escluso. (Prima di T58 quell'entropia la portava l'`owner`,
+    // che era il core comune ai titoli.)
     //
-    // Longest-match sul `name`, NON sulla chiave: le chiavi differiscono per la
-    // larghezza dell'emoji e `🖥️` porta un VS16 (U+FE0F, code point invisibile in
-    // più) → confrontare la lunghezza della chiave falserebbe la disambiguazione
-    // fra progetti con nomi in relazione di prefisso (`trading-java` vs
-    // `trading-java-engine`).
+    // `(?![\w-])` dopo il nome, NON `\b`: `-` è un non-word char, quindi `\b`
+    // matcherebbe dentro `🛒 ud-code-legacy` e assegnerebbe quella tab a `ud-code`.
+    // Il lookahead nega anche il trattino → i nomi in relazione di prefisso non si
+    // toccano più affatto, invece di dipendere dal solo tie-break sotto.
+    //
+    // Longest-match sul `name`, NON sul titolo matchato: la larghezza dell'emoji
+    // varia e `🖥️` porta un VS16 (U+FE0F, code point invisibile in più) →
+    // confrontare la lunghezza del match falserebbe la disambiguazione fra progetti
+    // con nomi in relazione di prefisso (`trading-java` vs `trading-java-engine`).
     //
     // Ritorna Map(id → {win}), dove `win` = PRESENZA del progetto → guida fade,
     // focus del bottone-nome e coalescing delle tab.
@@ -339,9 +368,7 @@ class CompassIndicator extends PanelMenu.Button {
             let best = null, bestLen = 0;
             for (const p of this._loomRegistry) {
                 if (p.name.length <= bestLen) continue;
-                const keys = [p.emoji, SURFACE_EMOJI.deck, SURFACE_EMOJI.terminal]
-                    .map(e => `${e} ${p.name}`);
-                if (!keys.some(k => title.includes(k))) continue;
+                if (!titleKeyRe(p.name).test(title)) continue;
                 bestLen = p.name.length;
                 best    = p;
             }
