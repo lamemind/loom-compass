@@ -23,6 +23,15 @@ const DBUS_INTERFACE_XML = `
       <arg type="s" name="profile_id" direction="in"/>
       <arg type="s" name="state"      direction="in"/>
     </method>
+    <!-- Aggiunto, non sostituito: i chiamanti sono script di shell che vivono
+         fuori da questo repo e si aggiornano a mano. Cambiare la firma di
+         SetState romperebbe ogni macchina non ancora allineata, e il guasto si
+         presenterebbe come stato che smette di arrivare, non come errore. -->
+    <method name="SetSessionState">
+      <arg type="s" name="profile_id" direction="in"/>
+      <arg type="s" name="session_id" direction="in"/>
+      <arg type="s" name="state"      direction="in"/>
+    </method>
     <method name="SetLabel">
       <arg type="s" name="profile_id" direction="in"/>
       <arg type="s" name="label"      direction="in"/>
@@ -42,6 +51,35 @@ const STATE_EMOJI = {
     idle:    '⚪',
     error:   '🔴',
 };
+
+// ── Registro dei processi Claude vivi (~/.claude/sessions) ───────────────────
+//
+// Un file JSON per processo CLI vivo, scritto dal CLI stesso. Fonte della vista
+// R/O per-sessione: non passa da D-Bus, quindi vede anche le sessioni lanciate
+// fuori da Ptyxis (che non hanno PTYXIS_PROFILE e non annunciano nulla).
+//
+// `status` ha TRE valori osservati, non due: `busy` (sta macinando), `waiting`
+// (fermo perché aspetta te, con `waitingFor: "input needed"`) e `idle`. Il
+// `waiting` copre da solo lo stato `ask` degli hook → la vista R/O distingue già
+// «ti aspetta» da «lavora» senza il canale D-Bus. Resta fuori il solo `done`:
+// una sessione che ha finito il turno torna `idle`, indistinguibile da una ferma
+// da ore.
+const LIVE_STATUS_STATE = {
+    busy:    'running',
+    waiting: 'ask',
+    idle:    'idle',
+};
+
+// Cap di righe-sessione per progetto: oltre, una riga di riepilogo `+N`. Serve
+// perché il menu è una popup a lunghezza non limitata — dieci sessioni su un
+// progetto spingerebbero fuori schermo i progetti sotto.
+const SESSION_ROWS_MAX = 6;
+
+// Stati che una riga-sessione può prendere DALL'HOOK quando il registro tace.
+// `running` è escluso di proposito: coincide con `busy`, che il registro osserva
+// direttamente — un `running` sopravvissuto a un turno finito mostrerebbe 🟢 su
+// una sessione ferma.
+const HOOK_ONLY_STATE = new Set(['ask', 'done', 'error']);
 
 // ── Surface → emoji ──────────────────────────────────────────────────────────
 //
@@ -88,6 +126,10 @@ class CompassService {
         this._indicator.setState(profileId, state);
     }
 
+    SetSessionState(profileId, sessionId, state) {
+        this._indicator.setSessionState(profileId, sessionId, state);
+    }
+
     SetLabel(_profileId, _label) {
         // v1: no-op — SetLabel dinamica è Fase 6
     }
@@ -110,8 +152,10 @@ class CompassIndicator extends PanelMenu.Button {
         super._init(0.0, 'Project Compass');
         this._ext       = extensionObj;
         this._sessions  = new Map(); // profileId → {state, seen}
+        this._sessionStates = new Map(); // sessionId → {state} — canale per-sessione (T119)
         this._registry  = [];
         this._loomRegistry = []; // registry dconf loom (T34) — cappelli + surface
+        this._liveSessions = []; // registro ~/.claude/sessions filtrato sui vivi (T119)
         this._winMap             = null; // cache aggiornata a ogni _buildMenu
         this._loomWins           = null; // cache window-map (project-level) progetti loom
         this._notificationSource = null;
@@ -140,6 +184,7 @@ class CompassIndicator extends PanelMenu.Button {
         // ── Bootstrap ────────────────────────────────────────────────────────
         this._loadRegistry();
         this._loadLoomRegistry();
+        this._loadLiveSessions();
         this._buildMenu();
 
         // Apertura menu → segna tutto visto + ricostruisce
@@ -148,6 +193,10 @@ class CompassIndicator extends PanelMenu.Button {
             this._markAllSeen();
             this._updateBadge();
             this._loadLoomRegistry(); // niente watch dconf (no typelib) → refresh su apertura
+            // Niente cache sul registro vivo: `status` cambia a ogni turno, e una
+            // cache mostrerebbe idle su una sessione che sta lavorando — cioè il
+            // difetto esatto che la vista esiste per non avere.
+            this._loadLiveSessions();
             this._buildMenu();
         });
     }
@@ -281,6 +330,166 @@ class CompassIndicator extends PanelMenu.Button {
         } catch (e) {
             logError(e, '[Compass] _loadLoomRegistry');
         }
+    }
+
+    // ── Registro dei processi vivi — vista R/O per-sessione (T119) ───────────
+
+    // `~` iniziale espanso: il registry dconf può portare la dir in forma tilde,
+    // mentre il `cwd` del registro vivo è sempre assoluto.
+    _expandDir(dir) {
+        if (!dir) return null;
+        const home = GLib.get_home_dir();
+        let d = dir.startsWith('~') ? home + dir.slice(1) : dir;
+        while (d.length > 1 && d.endsWith('/')) d = d.slice(0, -1);
+        return d;
+    }
+
+    // Campo 22 di /proc/<pid>/stat (`starttime`), come stringa.
+    //
+    // Il taglio parte dall'ULTIMA `)`: il campo 2 è il nome del comando fra
+    // parentesi e può contenere spazi e parentesi sue, quindi uno split cieco sui
+    // primi campi sbaglia. Dopo il taglio il primo token è il campo 3 → starttime
+    // sta all'indice 19.
+    _procStarttime(pid) {
+        try {
+            const [ok, bytes] = GLib.file_get_contents(`/proc/${pid}/stat`);
+            if (!ok) return null;
+            const line = new TextDecoder().decode(bytes);
+            const cut  = line.lastIndexOf(')');
+            if (cut < 0) return null;
+            const fields = line.slice(cut + 1).trim().split(/\s+/);
+            return fields[19] ?? null;
+        } catch (_e) {
+            return null; // processo morto fra readdir e lettura: non è un errore
+        }
+    }
+
+    // Il file resta su disco dopo un `kill -9`, e il pid può essere riciclato da
+    // un processo estraneo: la sola presenza del file non prova niente. Vivo =
+    // /proc esiste E il suo `starttime` combacia con il `procStart` registrato.
+    _loadLiveSessions() {
+        this._liveSessions = [];
+        try {
+            const dirPath = GLib.build_filenamev([GLib.get_home_dir(), '.claude', 'sessions']);
+            const dir     = Gio.File.new_for_path(dirPath);
+
+            let en;
+            try {
+                en = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            } catch (_e) {
+                return; // directory assente (nessun Claude Code mai avviato) → zero sessioni
+            }
+
+            let info;
+            while ((info = en.next_file(null)) !== null) {
+                const name = info.get_name();
+                if (!name.endsWith('.json')) continue;
+                try {
+                    const [ok, bytes] = GLib.file_get_contents(GLib.build_filenamev([dirPath, name]));
+                    if (!ok) continue;
+                    const s = JSON.parse(new TextDecoder().decode(bytes));
+                    if (!s?.pid || !s?.cwd) continue;
+                    // Il registro tiene un file anche per i processi spawnati
+                    // dall'SDK (subagent, fork in background): stesso `cwd` del
+                    // progetto, ma nessuna tab a cui tornare e nessuno `status`.
+                    // Elencarli direbbe che l'utente ha aperte sessioni che non
+                    // può raggiungere. Solo `cli` è una sessione interattiva vera.
+                    if ((s.entrypoint ?? 'cli') !== 'cli') continue;
+                    if (this._procStarttime(s.pid) !== String(s.procStart)) continue;
+                    this._liveSessions.push({
+                        pid:       s.pid,
+                        sessionId: s.sessionId ?? null,
+                        cwd:       s.cwd,
+                        name:      s.name ?? '',
+                        status:    s.status ?? 'idle',
+                        startedAt: s.startedAt ?? 0,
+                    });
+                } catch (_e) {
+                    // file scritto a metà mentre lo leggevamo: salta questo giro
+                }
+            }
+            en.close(null);
+        } catch (e) {
+            logError(e, '[Compass] _loadLiveSessions');
+        }
+        this._pruneSessionStates();
+    }
+
+    // Toglie gli stati per-sessione che non hanno più un processo vivo a
+    // dichiararli. Servono due potature in una: la sessione chiusa manda `end` e
+    // si toglie da sé, ma un `kill -9` no; e un `/clear` cambia il `sessionId`
+    // DENTRO lo stesso processo, lasciando indietro una entry che nessun evento
+    // futuro nominerà mai più.
+    _pruneSessionStates() {
+        const alive = new Set(this._liveSessions.map(s => s.sessionId).filter(Boolean));
+        for (const id of [...this._sessionStates.keys()])
+            if (!alive.has(id)) this._sessionStates.delete(id);
+    }
+
+    // Sessioni vive di un progetto, in ordine di apertura.
+    //
+    // Il registro vivo non porta l'identità del progetto: l'unico aggancio è il
+    // `cwd`, confrontato con la `dir` del registry dconf — uguale o discendente.
+    // Copre le sessioni spawnate da deck e compass (partono a project root) e chi
+    // lancia `claude` in una sottocartella. NON copre i worktree lane, che sono
+    // directory SORELLE `{project}-{lane}`: prenderli richiederebbe un
+    // `git worktree list` per progetto a ogni apertura del menu, e un match per
+    // prefisso di nome non è praticabile (`loom-works-plugin` comincia per
+    // `loom-works-` e non è una lane).
+    //
+    // Ordine per `startedAt`, non per urgenza: le righe devono stare ferme fra
+    // due aperture del menu, o si clicca su quella sbagliata.
+    _sessionsForProject(project) {
+        const dir = this._expandDir(project.dir);
+        if (!dir) return [];
+        return this._liveSessions
+            .filter(s => s.cwd === dir || s.cwd.startsWith(dir + '/'))
+            .sort((a, b) => a.startedAt - b.startedAt);
+    }
+
+    // Stato di UNA sessione, come cascata a due fonti (D3).
+    //
+    // Il registro vince ogni volta che dice qualcosa: `busy` e `waiting` sono
+    // fatti che il processo osserva su sé stesso, mentre l'hook è un annuncio che
+    // può essere vecchio di un turno. Solo su `idle` — il valore che il registro
+    // usa sia per «ha finito» sia per «ferma da ore» — decide lo stato semantico
+    // dell'hook, l'unico che sa dire `done`. Senza hook si resta su `idle`.
+    //
+    // La scala effettiva ha quattro valori, non cinque: `busy` del registro e
+    // `running` dell'hook sono lo stesso fatto (l'hook scatta su
+    // UserPromptSubmit, cioè nell'istante del passaggio a busy).
+    _sessionState(session) {
+        const live = LIVE_STATUS_STATE[session.status] ?? 'idle';
+        if (live !== 'idle') return live;
+        const hook = this._sessionHookState(session);
+        return HOOK_ONLY_STATE.has(hook) ? hook : 'idle';
+    }
+
+    // Stato semantico annunciato dagli hook per QUESTA sessione, keyed su
+    // `sessionId` (`SetSessionState`). Un bridge vecchio chiama il solo `SetState`
+    // keyed sul profilo → qui non arriva niente e la riga resta su quel che dice
+    // il registro: degradazione, non guasto.
+    _sessionHookState(session) {
+        if (!session.sessionId) return null;
+        return this._sessionStates.get(session.sessionId)?.state ?? null;
+    }
+
+    // Identificativo mostrato nella riga-sessione.
+    //
+    // Il `name` del registro è il titolo della tab (`🧵 loom-works · T119`): porta
+    // già emoji di progetto e task attiva, cioè le due cose che servono. Sotto la
+    // riga del progetto però emoji e nome sono ridondanti — restano solo se il
+    // titolo non è quello atteso (sessione titolata a mano). Senza titolo affatto
+    // (claude lanciato senza --name) resta il pid, che almeno è univoco.
+    _sessionLabel(session, project) {
+        const raw = (session.name ?? '').trim();
+        if (raw) {
+            const m = raw.match(titleKeyRe(project.name));
+            if (!m) return raw;
+            const rest = raw.slice(m[0].length).replace(/^[\s·:—-]+/, '').trim();
+            if (rest) return rest;
+        }
+        return `pid ${session.pid}`;
     }
 
     // ── Window matching ──────────────────────────────────────────────────────
@@ -424,6 +633,7 @@ class CompassIndicator extends PanelMenu.Button {
     // su dot e bottone-nome, e solo quando il progetto non ha nessuna finestra aperta.
     _addLoomProject(project) {
         const wins      = this._loomWins.get(project.id) ?? {win: null};
+        const sessions  = this._sessionsForProject(project);
         const hasLaunch = project.launch.length > 0;
 
         if (hasLaunch) {
@@ -459,7 +669,7 @@ class CompassIndicator extends PanelMenu.Button {
             item.menu.open  = () => _open(false);
             item.menu.close = () => _close(false);
 
-            const row = this._fillLoomHeader(item, project, wins);
+            const row = this._fillLoomHeader(item, project, wins, sessions);
 
             // chevron = bottone dedicato al toggle del sotto-menu launch. Va dentro
             // `row` (non nell'item) per stare sulla stessa riga, all'estrema destra
@@ -489,34 +699,67 @@ class CompassIndicator extends PanelMenu.Button {
             // Senza launch → NIENTE sotto-menu: riga inerte (highlight su hover) coi
             // soli bottoni inline. `activate:false` → il click sulla riga non attiva.
             const item = new PopupMenu.PopupBaseMenuItem({activate: false});
-            this._fillLoomHeader(item, project, wins);
+            this._fillLoomHeader(item, project, wins, sessions);
             this.menu.addMenuItem(item);
         }
+
+        // Righe-sessione: una per sessione viva, subito sotto il cappello e nel
+        // menu principale (non nel sotto-menu launch, che resta dietro il chevron
+        // e chiede un click in più per una cosa che si guarda a colpo d'occhio).
+        for (const s of this._cappedSessions(sessions))
+            this.menu.addMenuItem(this._sessionRow(s, project));
     }
 
-    // Rollup dello stato delle surface tracked di un cappello loom → un solo stato
-    // per il pallino, esattamente come le voci vecchie derivano il loro emoji da
-    // STATE_EMOJI[session.state]. Priorità (docs project-config-architecture):
-    //   error > ask > done > running > idle
-    // (error in testa: 🔴 è il più urgente; gli altri seguono il rollup congelato).
-    // Sorgente = _sessions, keyed su profile UUID; le surface loom mappano via
-    // `bindings` (bindings.claude / bindings.deck). Nessuno stato noto → idle.
-    _loomRollupState(project) {
-        let hasError = false, hasAsk = false, hasDone = false, hasRunning = false;
-        for (const uuid of Object.values(project.bindings ?? {})) {
-            const s = this._sessions.get(uuid);
-            if (!s) continue;
-            switch (s.state) {
-                case 'error':   hasError   = true; break;
-                case 'ask':     hasAsk     = true; break;
-                case 'done':    hasDone    = true; break;
-                case 'running': hasRunning = true; break;
-            }
+    // Applica il cap e, se taglia, sostituisce la coda con una sentinella che
+    // dichiara quante ne restano fuori: una lista troncata in silenzio mente.
+    _cappedSessions(sessions) {
+        if (sessions.length <= SESSION_ROWS_MAX) return sessions;
+        const head = sessions.slice(0, SESSION_ROWS_MAX);
+        head.push({overflow: sessions.length - SESSION_ROWS_MAX});
+        return head;
+    }
+
+    // Riga-sessione: glifo di stato + identificativo, indentata sotto il progetto.
+    // INERTE per decisione (D2): il focus è già mestiere del bottone-nome del
+    // cappello, e la mappatura sessione → tab Ptyxis non è ottenibile da nessuna
+    // fonte disponibile — il registro non la porta e Ptyxis non espone targeting
+    // per-finestra. Una riga che al click focussa la finestra duplicherebbe il
+    // bottone-nome su N righe.
+    _sessionRow(session, project) {
+        const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false});
+        const text = session.overflow
+            ? `      +${session.overflow} altre`
+            : `   ${STATE_EMOJI[this._sessionState(session)] ?? '⚪'}  ${this._sessionLabel(session, project)}`;
+        item.add_child(new St.Label({
+            text,
+            style_class: 'compass-session-row',
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+        return item;
+    }
+
+    // Rollup → un solo stato per il pallino del cappello. Priorità congelata in
+    // project-config-architecture: error > ask > done > running > idle (error in
+    // testa: 🔴 è il più urgente).
+    //
+    // La popolazione ridotta sono le SESSIONI VIVE, non più uno slot per surface.
+    // Prima la sorgente era `_sessions` keyed su profilo Ptyxis, e tutte le tab
+    // claude di un progetto ne condividono uno solo: N sessioni entravano nel
+    // rollup come un elemento, l'ultimo annuncio arrivato. Il canale vecchio resta
+    // per le surface NON claude (il deck), che non compaiono nel registro dei
+    // processi Claude; per claude è escluso di proposito, o lo stato appiccicato
+    // al profilo da una sessione morta di `kill -9` (che non manda mai `end`)
+    // continuerebbe a colorare il cappello per sempre.
+    _loomRollupState(project, sessions = []) {
+        const states = new Set();
+        for (const s of sessions) states.add(this._sessionState(s));
+        for (const [kind, uuid] of Object.entries(project.bindings ?? {})) {
+            if (kind === 'claude') continue;
+            const st = this._sessions.get(uuid);
+            if (st) states.add(st.state);
         }
-        if (hasError)   return 'error';
-        if (hasAsk)     return 'ask';
-        if (hasDone)    return 'done';
-        if (hasRunning) return 'running';
+        for (const s of ['error', 'ask', 'done', 'running'])
+            if (states.has(s)) return s;
         return 'idle';
     }
 
@@ -527,7 +770,7 @@ class CompassIndicator extends PanelMenu.Button {
     // che riempie l'item (x_expand FILL) e impacchetta a sinistra di default →
     // contenuto ancorato a sinistra. Ritorna `row` così il caller può appendere
     // il chevron dentro la stessa riga.
-    _fillLoomHeader(item, project, wins) {
+    _fillLoomHeader(item, project, wins, sessions = []) {
         const row = new St.BoxLayout({
             style_class: 'compass-loom-row',
             x_expand: true, x_align: Clutter.ActorAlign.FILL,
@@ -546,7 +789,7 @@ class CompassIndicator extends PanelMenu.Button {
         // hover della riga — `item.hover` è true anche col puntatore sopra i bottoni
         // figli (niente flicker). Lo STATO (emoji del rollup) NON cambia: varia solo
         // l'alpha, a segnalare "progetto non presente".
-        const rollup = this._loomRollupState(project);
+        const rollup = this._loomRollupState(project, sessions);
         const dot = new St.Label({
             text: STATE_EMOJI[rollup] ?? '⚪',
             style_class: 'compass-dot',
@@ -910,7 +1153,37 @@ class CompassIndicator extends PanelMenu.Button {
         }
     }
 
-    // ── setState (chiamato dal servizio D-Bus) ───────────────────────────────
+    // ── setState / setSessionState (chiamati dal servizio D-Bus) ─────────────
+
+    // Canale per-sessione. `end` qui NON significa più «riporta a idle» come sul
+    // canale vecchio: significa «togli questa sessione», perché la mappa è keyed
+    // sulla conversazione e non sul profilo del terminale. Se restasse la
+    // semantica vecchia, una sessione chiusa resterebbe elencata a idle finché
+    // dura la sessione di GNOME.
+    //
+    // `profileId` può arrivare vuoto: una sessione lanciata fuori da Ptyxis non
+    // ha un profilo da annunciare, ma ha comunque un `sessionId`. Lo stato
+    // per-sessione entra lo stesso; salta solo il canale vecchio, che senza
+    // profilo non ha una chiave.
+    setSessionState(profileId, sessionId, state) {
+        if (sessionId) {
+            if (state === 'end') this._sessionStates.delete(sessionId);
+            else                 this._sessionStates.set(sessionId, {state});
+        }
+        // Il canale vecchio resta alimentato: tiene il badge, il suono, la
+        // notifica di `ask` e il rollup delle surface non-claude.
+        if (profileId) { this.setState(profileId, state); return; }
+        this._refreshMenu();
+    }
+
+    // Ricostruzione a seguito di un annuncio D-Bus: il registro dei processi va
+    // riletto qui, non solo all'apertura del menu, o col menu tenuto aperto le
+    // righe resterebbero ferme sull'istantanea del momento in cui è stato aperto.
+    // Costa la lettura di una manciata di file piccoli.
+    _refreshMenu() {
+        this._loadLiveSessions();
+        this._buildMenu();
+    }
 
     setState(profileId, state) {
         const project = this._registry.find(p => p.profile === profileId);
@@ -934,7 +1207,7 @@ class CompassIndicator extends PanelMenu.Button {
             prev.state = 'idle';
             prev.seen  = true;
             this._sessions.set(profileId, prev);
-            this._buildMenu();
+            this._refreshMenu();
             return;
         }
 
@@ -957,7 +1230,7 @@ class CompassIndicator extends PanelMenu.Button {
             }
         }
 
-        this._buildMenu();
+        this._refreshMenu();
     }
 
     // ── Audio ────────────────────────────────────────────────────────────────

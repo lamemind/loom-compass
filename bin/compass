@@ -26,11 +26,37 @@ UUID="compass@lamemind"
 _compass_state() {
     local state="$1"
     local profile="${PTYXIS_PROFILE:-}"
+    local session="${CLAUDE_CODE_SESSION_ID:-}"
 
-    [ -z "$profile" ] && exit 0
+    # Niente da annunciare su nessuno dei due canali → esci muto, così l'hook non
+    # rompe le sessioni lanciate fuori da Ptyxis.
+    if [ -z "$profile" ] && [ -z "$session" ]; then
+        exit 0
+    fi
 
-    # `|| true`: se l'estensione è disabilitata il bus non risponde — un hook
-    # Claude non deve mai fallire per questo.
+    # Canale per-sessione, quando la chiave c'è. Il profilo viaggia comunque (può
+    # essere vuoto): serve all'estensione per il badge, il suono e la notifica,
+    # che restano di progetto.
+    #
+    # `|| true` ovunque: se l'estensione è disabilitata il bus non risponde, e un
+    # hook Claude non deve mai fallire per questo.
+    if [ -n "$session" ]; then
+        if gdbus call --session \
+             --dest        org.lamemind.Compass \
+             --object-path /org/lamemind/Compass \
+             --method      org.lamemind.Compass.SetSessionState \
+             "$profile" "$session" "$state" \
+             >/dev/null 2>&1
+        then
+            return 0
+        fi
+        # Estensione più vecchia del bridge: il metodo non esiste ancora. Si
+        # ricade sul canale di progetto invece di perdere lo stato — è ciò che
+        # rende l'ordine di aggiornamento fra le due parti indifferente.
+    fi
+
+    [ -z "$profile" ] && return 0
+
     gdbus call --session \
       --dest        org.lamemind.Compass \
       --object-path /org/lamemind/Compass \

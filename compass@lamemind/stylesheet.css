@@ -19,6 +19,11 @@
 .compass-surface-btn:hover {
     background-color: rgba(255, 255, 255, 0.12);
 }
+/* Riga-sessione sotto il cappello (T119): sola lettura, subordinata */
+.compass-session-row {
+    font-size: 0.9em;
+    opacity: 0.85;
+}
 .compass-chevron {
     padding: 6px 6px;
     border-radius: 4px;
