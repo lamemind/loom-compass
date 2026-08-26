@@ -21,6 +21,103 @@ set -euo pipefail
 
 UUID="compass@lamemind"
 
+# Registro dei processi Claude vivi: un file JSON per processo CLI, keyed sul pid
+# nel nome. Stessa fonte che l'estensione legge per la vista R/O per-sessione.
+LIVE_DIR="${HOME}/.claude/sessions"
+
+# Attesa massima della conferma di `waiting`, con margine sotto il timeout di 5s
+# con cui gli hook invocano questo bridge. Il conto non è solo 15 × 0.1s: ogni
+# giro paga anche una scansione del registro, che cresce col numero di sessioni
+# aperte — il caso lento è quello che non trova mai il file, cioè il solo che
+# arriva in fondo al loop.
+ASK_POLL_TRIES=15
+ASK_POLL_SLEEP=0.1
+
+# ── Guard di conferma per `ask` ──────────────────────────────────────────────
+#
+# `ask` arriva dall'hook `Notification`, che Claude Code emette anche quando la
+# sessione è soltanto ferma da un minuto senza che nessuno abbia chiesto niente
+# (feature `notify_idle`, dichiarata dal CLI stesso in `peerFeatures`). Quello
+# non è uno stato in cui qualcuno ti aspetta, ma arriva sul canale che significa
+# «ti aspetta».
+#
+# Il danno non è il lampeggio: è la permanenza. L'estensione tiene lo stato
+# annunciato in `_sessionStates` e nessun evento lo revoca — non esiste un hook
+# «l'attesa è finita». Una conversazione lasciata lì diventa gialla e ci resta
+# fino al prossimo prompt o alla chiusura.
+#
+# Il registro dei processi vivi distingue i due casi da sé: `status: waiting` +
+# `waitingFor: "input needed"` quando c'è una domanda davvero aperta, `idle`
+# quando il turno è solo finito. Lo scrive il CLI osservando sé stesso, quindi è
+# un fatto e non un annuncio — e per la stessa ragione si spegne da solo.
+#
+# SOPPRIME SOLO CON LA PROVA IN MANO. Registro assente (versione del CLI che non
+# lo scrive), `CLAUDE_CODE_SESSION_ID` fuori dall'ambiente, campo `status` che
+# non c'è: in tutti questi casi l'annuncio parte come prima. Un guard che
+# blocca sull'incertezza toglierebbe `ask` del tutto a chi quel registro non ce
+# l'ha, sostituendo un falso positivo rumoroso con un falso negativo muto.
+#
+# POLL E NON LETTURA SECCA. L'hook e la scrittura del registro sono due eventi
+# indipendenti e nessuno ne garantisce l'ordine: letto una volta sola, un `ask`
+# legittimo verrebbe scartato per una manciata di millisecondi di anticipo. Il
+# loop esce al primo `waiting`, quindi il caso buono non paga l'attesa piena;
+# la paga il falso positivo, che è appunto quello da far morire in silenzio.
+
+# Path del file di registro che dichiara QUESTO sessionId, o niente.
+#
+# Il match è sul contenuto e non sul nome perché il registro è keyed sul pid,
+# che l'hook non conosce: la chiave che ha in mano è il sessionId.
+_live_file_for() {
+    local sid="$1" out
+    # Un grep solo su tutta la directory, non uno per file: il loop di poll lo
+    # rieseguirebbe a ogni giro, e il costo si moltiplicherebbe per il numero di
+    # sessioni aperte proprio sulla macchina che ne ha di più.
+    out=$(grep -l "\"sessionId\"[[:space:]]*:[[:space:]]*\"${sid}\"" \
+              "$LIVE_DIR"/*.json 2>/dev/null | head -1) || true
+    [ -n "$out" ] || return 1
+    printf '%s' "$out"
+}
+
+# Campo `status` del file di registro, stringa vuota se illeggibile.
+#
+# `jq` quando c'è, altrimenti un grep sulla coppia chiave-valore intera: il file
+# è un JSON piatto su una riga, e cercare `"status"` con le virgolette di
+# chiusura evita di agganciare una chiave che comincia allo stesso modo.
+_live_status_of() {
+    local f="$1"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.status // ""' "$f" 2>/dev/null || true
+        return 0
+    fi
+    grep -o "\"status\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$f" 2>/dev/null \
+        | head -1 \
+        | sed 's/.*"\([^"]*\)"$/\1/' || true
+}
+
+# Il registro conferma che questa sessione sta davvero aspettando l'utente?
+# Esce 0 anche quando la domanda non è decidibile — vedi il commento sopra.
+_ask_confirmed() {
+    local sid="${CLAUDE_CODE_SESSION_ID:-}"
+    [ -n "$sid" ] || return 0
+    [ -d "$LIVE_DIR" ] || return 0
+
+    local i f st seen=0
+    for (( i = 0; i < ASK_POLL_TRIES; i++ )); do
+        if f=$(_live_file_for "$sid"); then
+            st=$(_live_status_of "$f")
+            [ "$st" = "waiting" ] && return 0
+            [ -n "$st" ] && seen=1
+        fi
+        sleep "$ASK_POLL_SLEEP"
+    done
+
+    # Letto per tutta la finestra e mai `waiting`: è la prova che serve.
+    if [ "$seen" -eq 1 ]; then
+        return 1
+    fi
+    return 0
+}
+
 # ── Hook di stato: annuncio D-Bus ────────────────────────────────────────────
 
 _compass_state() {
@@ -83,7 +180,14 @@ cmd="${1:?uso: compass <running|ask|done|idle|end|reload>}"
 shift || true
 
 case "$cmd" in
-  running|ask|done|idle|end)
+  ask)
+    # Unico stato con un guard: è l'unico che l'hook annuncia su un evento più
+    # largo del suo significato. Silenzio, non errore — l'hook chiamante non
+    # deve distinguere «soppresso» da «riuscito».
+    _ask_confirmed || exit 0
+    _compass_state "$cmd"
+    ;;
+  running|done|idle|end)
     _compass_state "$cmd"
     ;;
   reload)

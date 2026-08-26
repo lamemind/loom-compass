@@ -44,9 +44,18 @@ const DBUS_INTERFACE_XML = `
 
 // ── Stato → emoji ────────────────────────────────────────────────────────────
 
+// `running` e `ask` non sono pallini colorati come gli altri tre: dicono COSA
+// sta succedendo, non un livello su una scala. Sono i due stati su cui si
+// decide se andare in quella tab, e un glifo figurativo si becca in periferia
+// dove un colore va confrontato con gli altri per essere letto.
+//
+// `⚙️` porta un VS16 (U+2699 U+FE0F): U+2699 da solo è text-default e
+// renderebbe come carattere tipografico monocromo. Qui il selettore si può
+// usare senza cautele — siamo in un St.Label sotto Pango, non in un terminale
+// dove la larghezza dichiarata e quella disegnata possono discordare.
 const STATE_EMOJI = {
-    running: '🟢',
-    ask:     '🟡',
+    running: '⚙️',
+    ask:     '❓',
     done:    '✅',
     idle:    '⚪',
     error:   '🔴',
@@ -76,10 +85,28 @@ const LIVE_STATUS_STATE = {
 const SESSION_ROWS_MAX = 6;
 
 // Stati che una riga-sessione può prendere DALL'HOOK quando il registro tace.
-// `running` è escluso di proposito: coincide con `busy`, che il registro osserva
-// direttamente — un `running` sopravvissuto a un turno finito mostrerebbe 🟢 su
-// una sessione ferma.
-const HOOK_ONLY_STATE = new Set(['ask', 'done', 'error']);
+//
+// Ci sta solo ciò che il registro NON sa osservare. Uno stato che il registro
+// osserva già non va preso anche dall'hook: l'annuncio è un evento che nessuno
+// revoca, quindi resterebbe acceso dopo la fine della condizione che lo ha
+// prodotto, e coprirebbe il valore vero letto dal file.
+//
+// `running` è escluso perché coincide con `busy` — un `running` sopravvissuto a
+// un turno finito mostrerebbe ⚙️ su una sessione ferma.
+//
+// `ask` è escluso per la stessa ragione: coincide con `waiting`, che il CLI
+// scrive su di sé insieme a `waitingFor: "input needed"`. Un `ask` annunciato su
+// una domanda poi decaduta (ESC, permission prompt annullato) non ha nessun
+// evento che lo spenga — il registro torna `idle` in silenzio — e la riga
+// resterebbe ❓ finché non riscrivi in quella conversazione.
+//
+// `done` resta: è l'unico stato che il registro non distingue. Una sessione che
+// ha finito il turno e una ferma da tre ore sono entrambe `idle` nel file, e
+// solo l'hook `Stop` sa quale delle due è.
+//
+// L'hook `ask` non muore per questo — continua ad alimentare il badge della top
+// bar, la campanella e la notifica, che passano da `setState` e non da qui.
+const HOOK_ONLY_STATE = new Set(['done', 'error']);
 
 // ── Surface → emoji ──────────────────────────────────────────────────────────
 //
@@ -617,11 +644,12 @@ class CompassIndicator extends PanelMenu.Button {
     // Voce progetto loom = UNA riga self-contained (merge vecchio+nuovo), non più
     // header di sotto-menu con figli esplosi. Layout:
     //
-    //   [🟢]  [🧵 loom-works ─────────]  [🎴]   [▸]
+    //   [⚙️]  [🧵 loom-works ─────────]  [🎴]   [▸]
     //   dot   claude (emoji+title, →)    deck   chevron (solo se launch custom)
     //
-    //  - dot           = pallino presenza (proxy dello stato finché il rollup live
-    //                    non esiste, Slice 3): finestra del progetto aperta → 🟢, else ⚪.
+    //  - dot           = STATO del progetto, per rollup dei figli (_loomRollupState).
+    //                    La presenza non è più il suo colore ma la sua OPACITÀ, vedi
+    //                    il fade più sotto: due assi distinti sullo stesso glifo.
     //  - name btn      = emoji+nome → focus del progetto se aperto, altrimenti lancia
     //                    la surface default. L'UNICO focus-or-launch della riga.
     //  - deck btn      = emoji fissa 🎴 (solo se surface deck abilitata) → always-launch.

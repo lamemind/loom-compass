@@ -10,8 +10,8 @@ Ogni progetto è un **cappello** nel menu; sotto vivono le **surface** — i mod
 
 ```
 🧵 loom-works                    ← cappello (progetto)
-  ├─ claude  #1  🟢 running      ┐ tracked: stato live, match finestra, click→focus
-  ├─ claude  #2  🟡 ask          │
+  ├─ claude  #1  ⚙️ running      ┐ tracked: stato live, match finestra, click→focus
+  ├─ claude  #2  ❓ ask          │
   ├─ deck        ○ open          ┘
   └─ codium      (apri)          ← launch: comando arbitrario @project-root
 ```
