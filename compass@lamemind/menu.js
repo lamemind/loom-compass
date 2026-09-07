@@ -50,6 +50,26 @@ export const STATE_EMOJI = {
 // progetto spingerebbero fuori schermo i progetti sotto.
 const SESSION_ROWS_MAX = 6;
 
+// Stati per cui la riga porta l'età oltre al glifo (D1, T149): condividono lo
+// stesso campo (`statusUpdatedAt` via `Model.sessionAges`) — includere
+// `running` non costa una riga in più. `idle` resta nudo: lì la cifra
+// direbbe solo da quanto non succede niente.
+const AGED_STATES = new Set(['running', 'ask', 'done']);
+
+// Glifo orologio unico e fisso per l'età (P4), non un set per stato. Porta un
+// VS16 esplicito (U+1F550 U+FE0F) con la stessa cautela di `⚙️` sopra.
+const CLOCK_EMOJI = '\u{1F550}️';
+
+// Cap della label di riga (P3): le label osservate stanno fra 3 e 17
+// caratteri (`T67`, `T149`, `T67-calm-elephant`) più il ripiego `pid <n>`;
+// venti le tengono intere e restano rete per un titolo scritto a mano.
+const LABEL_MAX = 20;
+
+function truncateLabel(label) {
+    if (label.length <= LABEL_MAX) return label;
+    return label.slice(0, LABEL_MAX - 1) + '…';
+}
+
 // ── Etichetta di sessione ────────────────────────────────────────────────────
 
 // Identificativo mostrato nella riga-sessione.
@@ -61,13 +81,25 @@ const SESSION_ROWS_MAX = 6;
 // (claude lanciato senza --name) resta il pid, che almeno è univoco.
 export function sessionLabel(session, project) {
     const raw = (session.name ?? '').trim();
+    let label = `pid ${session.pid}`;
     if (raw) {
         const m = raw.match(Desktop.titleKeyRe(project.name));
-        if (!m) return raw;
-        const rest = raw.slice(m[0].length).replace(/^[\s·:—-]+/, '').trim();
-        if (rest) return rest;
+        if (!m) {
+            label = raw;
+        } else {
+            const rest = raw.slice(m[0].length).replace(/^[\s·:—-]+/, '').trim();
+            if (rest) label = rest;
+        }
     }
-    return `pid ${session.pid}`;
+    return truncateLabel(label);
+}
+
+// `età-stato/età-conversazione` (D2, schizzo utente): il primo numero decide
+// se andare in quella tab adesso, il secondo dà solo il contesto della durata
+// della conversazione.
+function ageSuffix(session) {
+    const {stateAgeMs, convoAgeMs} = Model.sessionAges(session, Date.now());
+    return ` · ${CLOCK_EMOJI} ${Model.formatAge(stateAgeMs)}/${Model.formatAge(convoAgeMs)}`;
 }
 
 // ── Costruzione del menu ─────────────────────────────────────────────────────
@@ -213,9 +245,15 @@ export function cappedSessions(sessions) {
 // bottone-nome su N righe.
 export function sessionRow(session, project, channels) {
     const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false});
-    const text = session.overflow
-        ? `      +${session.overflow} altre`
-        : `   ${STATE_EMOJI[Model.sessionState(session, channels)] ?? '⚪'}  ${sessionLabel(session, project)}`;
+    let text;
+    if (session.overflow) {
+        text = `      +${session.overflow} altre`;
+    } else {
+        const state = Model.sessionState(session, channels);
+        const glyph = STATE_EMOJI[state] ?? '⚪';
+        const age   = AGED_STATES.has(state) ? ageSuffix(session) : '';
+        text = `   ${glyph}  ${sessionLabel(session, project)}${age}`;
+    }
     item.add_child(new St.Label({
         text,
         style_class: 'compass-session-row',
