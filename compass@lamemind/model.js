@@ -199,6 +199,16 @@ export function loadLoomRegistry() {
     }
 }
 
+// Mappa inversa binding UUID → progetto, estratta dall'inline che `setState`
+// (impl.js) usa per risolvere il cappello loom da un `profileId` e poter
+// notificare. Chi ne ha bisogno una seconda volta (badge, T149) la richiama
+// invece di riscrivere lo stesso `find`.
+export function projectByBinding(loomRegistry, profileId) {
+    return loomRegistry.find(
+        p => Object.values(p.bindings ?? {}).includes(profileId)
+    ) ?? null;
+}
+
 // ── Registro dei processi vivi — vista R/O per-sessione (T119) ───────────────
 
 // `~` iniziale espanso: il registry dconf può portare la dir in forma tilde,

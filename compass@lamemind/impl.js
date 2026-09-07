@@ -192,13 +192,20 @@ class CompassIndicator extends PanelMenu.Button {
         for (const s of this._sessions.values()) s.seen = true;
     }
 
+    // Concatenazione delle emoji dei progetti in attesa (D3), non un conteggio:
+    // un `2` non dice quali due, e aprire il menu per saperlo è esattamente il
+    // click che il badge dovrebbe risparmiare. `Set` deduplica per progetto —
+    // due surface dello stesso cappello (`claude` e `deck`) in attesa insieme
+    // risolvono allo stesso `project.emoji` e contano una volta sola (T149).
     _updateBadge() {
-        let count = 0;
-        for (const s of this._sessions.values()) {
-            if (!s.seen && (s.state === 'ask' || s.state === 'done')) count++;
+        const emojis = new Set();
+        for (const [profileId, s] of this._sessions) {
+            if (s.seen || (s.state !== 'ask' && s.state !== 'done')) continue;
+            const project = Model.projectByBinding(this._loomRegistry, profileId);
+            if (project) emojis.add(project.emoji);
         }
-        if (count > 0) {
-            this._badge.text    = `${count}`;
+        if (emojis.size > 0) {
+            this._badge.text    = [...emojis].join('');
             this._badge.visible = true;
         } else {
             this._badge.text    = '';
@@ -248,9 +255,7 @@ class CompassIndicator extends PanelMenu.Button {
         // Il cappello loom si tiene come OGGETTO, non come bool: oltre a decidere se
         // il profilo è conosciuto serve a notificare (displayName) e a risolvere la
         // finestra col matcher nuovo — vedi _showNotification.
-        const loomProject = this._loomRegistry.find(
-            p => Object.values(p.bindings ?? {}).includes(profileId)
-        );
+        const loomProject = Model.projectByBinding(this._loomRegistry, profileId);
         if (!project && !loomProject) return; // sconosciuto a entrambi → ignora
 
         const prev      = this._sessions.get(profileId) ?? {state: 'idle', seen: true};
