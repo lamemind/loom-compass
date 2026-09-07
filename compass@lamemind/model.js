@@ -276,6 +276,7 @@ export function loadLiveSessions(channels) {
                     name:      s.name ?? '',
                     status:    s.status ?? 'idle',
                     startedAt: s.startedAt ?? 0,
+                    statusUpdatedAt: s.statusUpdatedAt ?? 0,
                 });
             } catch (_e) {
                 // file scritto a metà mentre lo leggevamo: salta questo giro
@@ -323,6 +324,33 @@ export function sessionsForProject(project, liveSessions) {
     return liveSessions
         .filter(s => s.cwd === dir || s.cwd.startsWith(dir + '/'))
         .sort((a, b) => a.startedAt - b.startedAt);
+}
+
+// ── Età di una sessione (T149) ────────────────────────────────────────────
+
+// Delta in millisecondi, SENZA formattazione. L'età dello stato è SEMPRE
+// `now - statusUpdatedAt`, anche quando lo stato reso è `done`: sul registro
+// quella sessione è `idle`, e `statusUpdatedAt` data il turno finito — la
+// stessa identica lettura che serve a `running` e `ask`. Nessuna cascata per
+// stato: il campo vale uniformemente per i tre stati che la riga mostra
+// (misura preflight 2026-09-07).
+export function sessionAges(session, nowMs) {
+    return {
+        stateAgeMs: Math.max(0, nowMs - session.statusUpdatedAt),
+        convoAgeMs: Math.max(0, nowMs - session.startedAt),
+    };
+}
+
+// Magnitudine invece di minuti nudi (P2): la cifra più fine è il minuto, poi
+// ore, poi giorni. `Math.floor`, mai `round` — un'età non anticipa la soglia
+// successiva.
+export function formatAge(ms) {
+    const minutes = Math.floor(ms / 60000);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `${days}g`;
 }
 
 // Stato di UNA sessione, come cascata a due fonti (D3).
