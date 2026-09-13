@@ -336,6 +336,90 @@ export function sessionsForProject(project, liveSessions) {
         .sort((a, b) => a.startedAt - b.startedAt);
 }
 
+// ── Marche per-conversazione: il sidecar del deck (T158) ─────────────────────
+//
+// `<project-dir>/.claude/loom/session-tasks.jsonl` — lo stesso file JSONL
+// append-only con cui il deck lega una conversazione a una task. Compass ne legge
+// e ne scrive DUE campi booleani, `priority` e `pinned`; gli altri (`taskId`,
+// `forkOf`, `note`) appartengono a chi li scrive e non vengono toccati.
+//
+// È la prima scrittura su disco di compass, e regge due scrittori senza lock
+// perché nessuno dei due rilegge-modifica-riscrive: si appende una riga, e vince
+// l'ultima che nomina il campo. Due toggle premuti a mezzo secondo di distanza
+// dal deck e da qui non si perdono a vicenda — si sovrascrivono nell'ordine di
+// arrivo.
+//
+// Il file è macchina-locale (`.gitignore` esclude `.claude/loom/`): la marca non
+// entra in un commit.
+
+export function sessionMarksPath(projectDir) {
+    const dir = expandDir(projectDir);
+    if (!dir) return null;
+    return GLib.build_filenamev([dir, '.claude', 'loom', 'session-tasks.jsonl']);
+}
+
+// sessionId → {priority, pinned}. LAST-WINS PER CAMPO, come il lettore del deck:
+// vince l'ultimo record che NOMINA il campo, e un record che non lo nomina non lo
+// tocca. `false` è quindi una smarcatura esplicita, non un'assenza — ed è il
+// motivo per cui il campo va letto col `typeof` e non per verità.
+export function loadSessionMarks(projectDir) {
+    const marks = new Map();
+    const path  = sessionMarksPath(projectDir);
+    if (!path) return marks;
+
+    let text;
+    try {
+        const [ok, bytes] = GLib.file_get_contents(path);
+        if (!ok) return marks;
+        text = new TextDecoder().decode(bytes);
+    } catch (_e) {
+        return marks; // sidecar assente: nessuna marca, non un errore
+    }
+
+    for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        let d;
+        try { d = JSON.parse(line); } catch (_e) { continue; } // riga corrotta → salta
+        if (typeof d?.sessionId !== 'string') continue;
+        const cur = marks.get(d.sessionId) ?? {};
+        if (typeof d.priority === 'boolean') cur.priority = d.priority;
+        if (typeof d.pinned   === 'boolean') cur.pinned   = d.pinned;
+        marks.set(d.sessionId, cur);
+    }
+    return marks;
+}
+
+// Appende una marca. Il record porta il SOLO campo toccato, come fa il deck: uno
+// con due campi riscriverebbe anche quello che l'utente non ha premuto.
+//
+// Ritorna `true` solo se la riga è finita su disco, e il chiamante accende la UI
+// solo allora: un toggle che si illumina senza che il file cambi mentirebbe, e il
+// giro di menu successivo lo rimetterebbe indietro senza spiegare perché.
+export function writeSessionMark(projectDir, sessionId, field, value) {
+    const path = sessionMarksPath(projectDir);
+    if (!path || !sessionId) return false;
+    try {
+        const file = Gio.File.new_for_path(path);
+        try {
+            file.get_parent().make_directory_with_parents(null);
+        } catch (_e) {
+            // già esistente: `make_directory_with_parents` solleva su EXISTS
+        }
+        const rec = {
+            sessionId,
+            [field]: value,
+            ts: GLib.DateTime.new_now_utc().format_iso8601(),
+        };
+        const os = file.append_to(Gio.FileCreateFlags.NONE, null);
+        os.write_all(new TextEncoder().encode(JSON.stringify(rec) + '\n'), null);
+        os.close(null);
+        return true;
+    } catch (e) {
+        logError(e, '[Compass] writeSessionMark');
+        return false;
+    }
+}
+
 // ── Età di una sessione (T149) ────────────────────────────────────────────
 
 // Delta in millisecondi, SENZA formattazione. L'età dello stato è SEMPRE

@@ -60,6 +60,21 @@ const AGED_STATES = new Set(['running', 'ask', 'done']);
 // VS16 esplicito (U+1F550 U+FE0F) con la stessa cautela di `⚙️` sopra.
 const CLOCK_EMOJI = '\u{1F550}️';
 
+// Glifi dei due toggle per-conversazione (T158): 🚨 priorità, 📌 pin. Il nome
+// della chiave È il nome del campo nel sidecar — la stessa stringa viaggia dal
+// widget al file, così non esiste una tabella di traduzione da tenere allineata.
+const MARK_GLYPH = {priority: '🚨', pinned: '📌'};
+
+// Indentazione della riga-sessione sotto il cappello, in pixel.
+//
+// Prima erano spazi dentro la stringa dell'etichetta, e non potevano restare: con
+// un blocco ancorato a destra l'indentazione deve stare sul CONTENITORE, o i due
+// blocchi si spostano insieme. Sta come stile inline e non in `stylesheet.css`
+// perché lo stylesheet resta in cache nel loader fino al prossimo relogin: una
+// regola nuova lì non si vedrebbe finché non si riavvia la sessione grafica.
+const ROW_INDENT_PX      = 18;
+const OVERFLOW_INDENT_PX = 34;
+
 // Cap della label di riga (P3): le label osservate stanno fra 3 e 17
 // caratteri (`T67`, `T149`, `T67-calm-elephant`) più il ripiego `pid <n>`;
 // venti le tengono intere e restano rete per un titolo scritto a mano.
@@ -97,9 +112,13 @@ export function sessionLabel(session, project) {
 // `età-stato/età-conversazione` (D2, schizzo utente): il primo numero decide
 // se andare in quella tab adesso, il secondo dà solo il contesto della durata
 // della conversazione.
-function ageSuffix(session) {
+//
+// Testo nudo, senza il ` · ` che lo saldava all'etichetta: da T158 l'età è
+// un'etichetta propria nel blocco destro della riga, e un separatore cablato
+// dentro il testo la lascerebbe appesa a un vicino che non ha più.
+function ageText(session) {
     const {stateAgeMs, convoAgeMs} = Model.sessionAges(session, Date.now());
-    return ` · ${CLOCK_EMOJI} ${Model.formatAge(stateAgeMs)}/${Model.formatAge(convoAgeMs)}`;
+    return `${CLOCK_EMOJI} ${Model.formatAge(stateAgeMs)}/${Model.formatAge(convoAgeMs)}`;
 }
 
 // ── Costruzione del menu ─────────────────────────────────────────────────────
@@ -224,8 +243,13 @@ export function addLoomProject(self, project) {
     // Righe-sessione: una per sessione viva, subito sotto il cappello e nel
     // menu principale (non nel sotto-menu launch, che resta dietro il chevron
     // e chiede un click in più per una cosa che si guarda a colpo d'occhio).
+    //
+    // Le marche si leggono UNA volta per progetto, non una per riga: il sidecar è
+    // un file solo, e un lettore per riga lo riaprirebbe N volte a ogni giro di
+    // menu — e i giri sono tanti, perché ogni annuncio D-Bus ricostruisce.
+    const marks = Model.loadSessionMarks(project.dir);
     for (const s of cappedSessions(sessions))
-        self.menu.addMenuItem(sessionRow(s, project, self._channels));
+        self.menu.addMenuItem(sessionRow(self, s, project, marks));
 }
 
 // Applica il cap e, se taglia, sostituisce la coda con una sentinella che
@@ -237,29 +261,117 @@ export function cappedSessions(sessions) {
     return head;
 }
 
-// Riga-sessione: glifo di stato + identificativo, indentata sotto il progetto.
-// INERTE per decisione (D2): il focus è già mestiere del bottone-nome del
-// cappello, e la mappatura sessione → tab Ptyxis non è ottenibile da nessuna
-// fonte disponibile — il registro non la porta e Ptyxis non espone targeting
-// per-finestra. Una riga che al click focussa la finestra duplicherebbe il
-// bottone-nome su N righe.
-export function sessionRow(session, project, channels) {
+// Riga-sessione, a due ancoraggi: `glifo titolo` a sinistra, `età toggle` a
+// destra. Come la riga del cappello, il contenuto sta in una St.BoxLayout propria
+// e non in figli diretti dell'item — la PopupBaseMenuItem centra i figli diretti
+// e non rispetta la loro richiesta di espansione, quindi senza il contenitore il
+// blocco destro non arriverebbe a destra.
+//
+// La riga resta INERTE per decisione (D2): il focus è già mestiere del
+// bottone-nome del cappello, e la mappatura conversazione → tab Ptyxis non è
+// ottenibile da nessuna fonte disponibile — il registro non la porta e Ptyxis non
+// espone targeting per-finestra. Una riga che al click focussa la finestra
+// duplicherebbe il bottone-nome su N righe.
+//
+// Quella decisione copre il focus, non ogni interazione: un toggle ha bisogno del
+// solo `sessionId`, che la riga possiede già. La forma che rispetta entrambe le
+// cose è un BOTTONE dentro la riga, non la riga resa reattiva — vedi markToggle.
+export function sessionRow(self, session, project, marks) {
     const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false});
-    let text;
-    if (session.overflow) {
-        text = `      +${session.overflow} altre`;
-    } else {
-        const state = Model.sessionState(session, channels);
-        const glyph = STATE_EMOJI[state] ?? '⚪';
-        const age   = AGED_STATES.has(state) ? ageSuffix(session) : '';
-        text = `   ${glyph}  ${sessionLabel(session, project)}${age}`;
-    }
-    item.add_child(new St.Label({
-        text,
+    const row  = new St.BoxLayout({
         style_class: 'compass-session-row',
+        x_expand: true, x_align: Clutter.ActorAlign.FILL,
+    });
+
+    // La sentinella dell'overflow non è una conversazione: non ha `sessionId`,
+    // quindi niente età e niente toggle — non c'è nulla da marcare. Resta la sola
+    // etichetta, più indentata delle righe vere come prima.
+    if (session.overflow) {
+        row.style = `padding-left: ${OVERFLOW_INDENT_PX}px;`;
+        row.add_child(new St.Label({
+            text: `+${session.overflow} altre`,
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+        item.add_child(row);
+        return item;
+    }
+
+    row.style = `padding-left: ${ROW_INDENT_PX}px;`;
+
+    const state = Model.sessionState(session, self._channels);
+    const glyph = STATE_EMOJI[state] ?? '⚪';
+    row.add_child(new St.Label({
+        text: `${glyph}  ${sessionLabel(session, project)}`,
         y_align: Clutter.ActorAlign.CENTER,
     }));
+
+    // spacer — St.Widget vuoto che mangia lo spazio in mezzo. NON un bottone: un
+    // bottone intercetterebbe hover e click su tutta la parte vuota della riga.
+    row.add_child(new St.Widget({x_expand: true}));
+
+    if (AGED_STATES.has(state))
+        row.add_child(new St.Label({
+            text: ageText(session),
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+
+    // I toggle chiedono due cose che possono mancare: il `sessionId` (la chiave
+    // della marca) e la `dir` del progetto (dove sta il sidecar). Senza una delle
+    // due la riga resta di sola lettura, invece di offrire un bottone che non può
+    // scrivere niente.
+    if (session.sessionId && project.dir) {
+        const mark = marks.get(session.sessionId) ?? {};
+        row.add_child(markToggle(project, session.sessionId, 'priority', mark.priority === true));
+        row.add_child(markToggle(project, session.sessionId, 'pinned',   mark.pinned   === true));
+    }
+
+    item.add_child(row);
     return item;
+}
+
+// Toggle di una marca per-conversazione — 🚨 priorità, 📌 pin — come bottone
+// dentro la riga inerte.
+//
+// Misurato, non dedotto: un `St.Button` reattivo figlio di una riga
+// `reactive: false` RICEVE il click. La non-reattività del padre toglie dal pick
+// il solo padre, non il sottoalbero — quindi non serve rendere reattiva la riga
+// con l'attivazione neutralizzata, e non si rimette in piedi l'aspettativa di
+// focus che la riga inerte esiste per non creare.
+//
+// Lo stato acceso/spento è l'OPACITÀ, sulla scala già in uso nel resto del menu:
+// 255 = marca accesa, 110 = spenta ma azionabile, con ripristino su hover.
+function markToggle(project, sessionId, field, initial) {
+    const btn = new St.Button({
+        style_class: 'compass-surface-btn',
+        // Il padding della classe è tarato sui bottoni del cappello: su una riga
+        // di conversazione sfonderebbe l'altezza. Lo stile inline batte quello
+        // della classe sulla sola proprietà che nomina, quindi l'evidenziazione
+        // su hover della classe resta.
+        style: 'padding: 1px 4px;',
+        label: MARK_GLYPH[field],
+        can_focus: true, track_hover: true,
+        y_align: Clutter.ActorAlign.CENTER,
+    });
+
+    let on = initial;
+    const paint = () => { btn.opacity = (on || btn.hover) ? 255 : 110; };
+    paint();
+    btn.connect('notify::hover', paint);
+
+    // Il menu NON si ricostruisce dopo il toggle: si ridipinge il solo bottone.
+    // Una ricostruzione distruggerebbe l'attore dentro il suo stesso handler, e
+    // farebbe sparire da sotto il puntatore la riga di chi sta per premere anche
+    // l'altro toggle. Il giro di menu successivo rilegge il file e conferma.
+    //
+    // La UI si muove solo se la scrittura è andata a segno: `writeSessionMark`
+    // ritorna false su sidecar non scrivibile, e lì il bottone non deve mentire.
+    btn.connect('clicked', () => {
+        if (!Model.writeSessionMark(project.dir, sessionId, field, !on)) return;
+        on = !on;
+        paint();
+    });
+
+    return btn;
 }
 
 // Popola l'header di una voce loom coi child inline: dot presenza + bottone
