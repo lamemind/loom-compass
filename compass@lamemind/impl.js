@@ -21,6 +21,8 @@ import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
@@ -51,6 +53,28 @@ const _Q = import.meta.url.includes('?') ? '?' + import.meta.url.split('?')[1] :
 const Model   = await import('./model.js'   + _Q);
 const Desktop = await import('./desktop.js' + _Q);
 const Menu    = await import('./menu.js'    + _Q);
+
+// ── Scorciatoia globale ──────────────────────────────────────────────────────
+
+// Nome dell'azione, e insieme il nome della chiave nello schema GSettings
+// (`schemas/org.gnome.shell.extensions.compass.gschema.xml`): `add_keybinding`
+// li vuole uguali — legge la combinazione dalla chiave che porta questo nome.
+// Una sola costante perché le due cose non possono divergere senza che la
+// registrazione fallisca in silenzio (`add_keybinding` ritorna NONE e non
+// solleva).
+const KEYBINDING_OPEN_DIALOG = 'open-session-dialog';
+
+// Id dello schema, passato a `getSettings()` ESPLICITAMENTE e non lasciato
+// derivare da `metadata['settings-schema']`.
+//
+// Misurato: `metadata.json` lo legge l'ExtensionManager quando CARICA
+// l'estensione, e il nostro hot-reload non lo rilegge — lo stub re-importa
+// `impl.js`, non rifà il caricamento dell'estensione. Un campo aggiunto a
+// metadata.json resta quindi invisibile fino al relogin, e `getSettings()` senza
+// argomento fallisce con «Expected type string for argument 'schema_id' but got
+// type undefined» su un file che sul disco è corretto. Il campo resta comunque
+// in metadata.json, dove lo cerca chi installa da zero.
+const SETTINGS_SCHEMA_ID = 'org.gnome.shell.extensions.compass';
 
 // ── D-Bus interface ──────────────────────────────────────────────────────────
 
@@ -401,6 +425,30 @@ class CompassIndicator extends PanelMenu.Button {
         source.addNotification(notification);
     }
 
+    // ── Modale sulla conversazione in focus (T159) ───────────────────────────
+
+    // Chiamata dalla scorciatoia globale, registrata da CompassImpl.
+    //
+    // Rilegge il registro dei processi vivi da qui e non riusa `_liveSessions`:
+    // quel campo è aggiornato all'apertura del menu e a ogni annuncio D-Bus, e
+    // la scorciatoia è il solo ingresso che non passa da nessuno dei due — senza
+    // la rilettura mostrerebbe l'istantanea di un evento arbitrariamente
+    // vecchio, incluse conversazioni già chiuse.
+    openSessionDialog() {
+        this._loomRegistry = Model.loadLoomRegistry();
+        this._liveSessions = Model.loadLiveSessions(this._channels);
+
+        // PROBE T159/P1 — titolo della finestra in focus e `name` delle sessioni
+        // vive, fianco a fianco. Serve a provare l'uguaglianza fra i due su cui
+        // poggia la risoluzione: la TESTA del titolo è provata dal matcher in
+        // esercizio, la coda no, e un delta lì renderebbe il confronto sempre
+        // falso senza produrre nessun errore.
+        const win = global.display.get_focus_window();
+        log(`[Compass] probe focus: wm_class=${win?.get_wm_class() ?? '(nessuna finestra)'} title=${JSON.stringify(win?.get_title() ?? null)}`);
+        for (const s of this._liveSessions)
+            log(`[Compass] probe live: pid=${s.pid} name=${JSON.stringify(s.name)} cwd=${s.cwd}`);
+    }
+
     // ── Cleanup ──────────────────────────────────────────────────────────────
 
     destroy() {
@@ -417,6 +465,13 @@ class CompassIndicator extends PanelMenu.Button {
 export class CompassImpl {
 
     enable(ext) {
+        // PRIMA di costruire qualunque cosa: `getSettings()` SOLLEVA se il
+        // compilato dello schema non è in `schemas/`, e un throw più in basso
+        // lascerebbe l'estensione a metà — indicatore in top bar, nessuna
+        // scorciatoia — cioè un regime funzionante per metà che nessun messaggio
+        // spiega. Qui invece non nasce niente e lo stub logga l'errore.
+        this._settings = ext.getSettings(SETTINGS_SCHEMA_ID);
+
         // Indicatore panel — `ext` = l'oggetto Extension (per ext.path, ecc.)
         this._indicator = new CompassIndicator(ext);
         Main.panel.addToStatusArea('project-compass', this._indicator);
@@ -433,9 +488,52 @@ export class CompassImpl {
             Gio.BusNameOwnerFlags.NONE,
             null, null, null
         );
+
+        // Scorciatoia globale → modale sulla conversazione in focus (T159).
+        //
+        // La combinazione vive nella chiave GSettings, non qui: il codice nomina
+        // l'azione, lo schema dice con che tasto si preme. Ne segue che
+        // cambiarla non richiede di toccare il codice — basta scrivere la chiave
+        // con `dconf write`.
+        //
+        // ActionMode.NORMAL e nient'altro: il bersaglio del modale è la finestra
+        // in focus, e in overview o a schermo bloccato non ce n'è una che voglia
+        // dire qualcosa.
+        //
+        // Il ritorno di `add_keybinding` NON è un booleano ma la `KeyBindingAction`
+        // assegnata, e `Meta.KeyBindingAction.NONE` significa registrazione
+        // fallita — combinazione già presa da un'altra azione, o chiave assente
+        // dallo schema. Va detto nel log: senza, il sintomo è «premo e non
+        // succede niente», indistinguibile da una callback rotta.
+        const action = Main.wm.addKeybinding(
+            KEYBINDING_OPEN_DIALOG,
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL,
+            () => this._indicator?.openSessionDialog()
+        );
+        if (action === Meta.KeyBindingAction.NONE) {
+            log(`[Compass] scorciatoia "${KEYBINDING_OPEN_DIALOG}" non registrata: ` +
+                `${JSON.stringify(this._settings.get_strv(KEYBINDING_OPEN_DIALOG))} è già presa o la chiave manca`);
+            this._keybindingOwned = false;
+        } else {
+            this._keybindingOwned = true;
+        }
     }
 
     disable() {
+        // Prima di tutto il resto: la combinazione è l'unica cosa che l'estensione
+        // lascia REGISTRATA NEL COMPOSITORE, quindi l'unica che può sopravvivere
+        // al disable e restare appesa a una callback su un oggetto distrutto.
+        // Revocata solo se la registrazione era riuscita: `removeKeybinding` su un
+        // nome mai registrato riporterebbe `allowKeybinding(nome, NONE)` su
+        // un'azione di qualcun altro.
+        if (this._keybindingOwned) {
+            Main.wm.removeKeybinding(KEYBINDING_OPEN_DIALOG);
+            this._keybindingOwned = false;
+        }
+        this._settings = null;
+
         if (this._ownNameId) {
             Gio.bus_unown_name(this._ownNameId);
             this._ownNameId = null;

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Schema GSettings dell'estensione. Unica chiave: la scorciatoia globale che apre
+  il modale sulla conversazione in focus (T159).
+
+  Il tipo è `as` (array di stringhe) e non `s` perché è quello che
+  `global.display.add_keybinding` pretende: la stessa azione può avere più
+  combinazioni, e una chiave scalare non entra nella sua API.
+
+  `<Super>c` come default (D3). La scelta sta FUORI dallo spazio `CTRL+lettera`
+  per costruzione: il compositore consuma il tasto e non lo ri-inoltra
+  all'applicazione in focus, quindi una combinazione che il terminale usa
+  gliela toglieremmo del tutto invece di condividerla. `Super`+lettera è lo
+  spazio che GNOME riserva alle azioni del compositore, dove Ptyxis e Claude
+  Code non hanno combinazioni proprie.
+
+  Resta configurabile a mano senza toccare il codice:
+    dconf write /org/gnome/shell/extensions/compass/open-session-dialog "['<Super>y']"
+-->
+<schemalist gettext-domain="compass">
+  <schema id="org.gnome.shell.extensions.compass"
+          path="/org/gnome/shell/extensions/compass/">
+    <key name="open-session-dialog" type="as">
+      <default><![CDATA[['<Super>c']]]></default>
+      <summary>Apri il modale sulla conversazione in focus</summary>
+      <description>
+        Combinazione che apre il modale di compass sulla conversazione Claude Code
+        ospitata dalla tab in focus: pin, nota e priorità, senza passare dal menu
+        della top bar.
+      </description>
+    </key>
+  </schema>
+</schemalist>
