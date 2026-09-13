@@ -35,7 +35,7 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 // loader di GJS include nella chiave di cache → il file viene riletto da disco a
 // ogni enable(). La query NON si eredita: un `import './menu.js'` statico da
 // `impl.js?v=2` risolve a `menu.js` nudo, che resta in cache per tutta la vita
-// del processo gnome-shell. Con quattro file, `compass reload` ne ricaricherebbe
+// del processo gnome-shell. Con cinque file, `compass reload` ne ricaricherebbe
 // uno — e il regime che ne esce è peggiore di «l'edit non prende»: impl nuovo che
 // parla con menu vecchio, un comportamento che non corrisponde a nessuna delle
 // due versioni, senza nessun errore a segnalarlo.
@@ -143,7 +143,10 @@ class CompassService {
 // monotonic rende ogni caricamento un GType distinto.
 //
 // È l'UNICA registerClass dell'estensione, e resta una anche dopo lo split:
-// nessuno dei tre moduli importa `gi://GObject` (invariante verificabile a grep).
+// nessuno dei quattro moduli importa il sistema di tipi. L'invariante si verifica
+// con `grep -l '^import GObject' *.js`, che deve nominare solo questo file —
+// ancorato a inizio riga sulla forma dell'import, perché un grep sul nome nudo
+// aggancia anche la prosa dei commenti che l'invariante la dichiarano.
 const CompassIndicator = GObject.registerClass(
 {GTypeName: 'CompassIndicator_' + GLib.get_monotonic_time()},
 class CompassIndicator extends PanelMenu.Button {
@@ -440,16 +443,16 @@ class CompassIndicator extends PanelMenu.Button {
         this._loomRegistry = Model.loadLoomRegistry();
         this._liveSessions = Model.loadLiveSessions(this._channels);
 
-        const target = Dialog.focusedSessions(this._loomRegistry, this._liveSessions);
-
-        // Log dell'esito della risoluzione, a ogni pressione: è il collaudo di
-        // una catena che non ha nessun altro modo di dichiarare cosa ha visto —
-        // zero candidate e una candidata sbagliata si presentano entrambe come
-        // un modale che non fa quello che aspetti.
-        log(`[Compass] focus → title=${JSON.stringify(target.title)} ` +
-            `project=${target.project?.id ?? '(nessuno)'} ` +
-            `candidate=${target.sessions.length} ` +
-            `[${target.sessions.map(s => `${s.pid}:${JSON.stringify(s.name)}`).join(' ')}]`);
+        // Il writer viaggia come argomento perché il modale non deve sapere dove
+        // finisce la conferma — e perché è il writer di T158, non uno nuovo: pin
+        // e priorità li scrivono già i toggle del popup con la stessa funzione,
+        // sullo stesso file e con gli stessi nomi di campo. Un secondo percorso
+        // di scrittura significherebbe due formati da tenere allineati su un file
+        // che leggono tre repo.
+        Dialog.openSessionDialog(
+            this._loomRegistry, this._liveSessions, this._channels,
+            Model.writeSessionMarks
+        );
     }
 
     // ── Cleanup ──────────────────────────────────────────────────────────────
