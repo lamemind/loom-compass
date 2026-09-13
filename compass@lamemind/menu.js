@@ -16,6 +16,7 @@
 
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import Pango from 'gi://Pango';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 // Token di cache-busting propagato ai fratelli: `import.meta.url` lo porta, un
@@ -49,17 +50,55 @@ const MARK_GLYPH = {priority: '🚨', pinned: '📌'};
 // blocchi si spostano insieme. Sta come stile inline e non in `stylesheet.css`
 // perché lo stylesheet resta in cache nel loader fino al prossimo relogin: una
 // regola nuova lì non si vedrebbe finché non si riavvia la sessione grafica.
-const ROW_INDENT_PX      = 18;
-const OVERFLOW_INDENT_PX = 34;
+const ROW_INDENT_PX      = 8;
+const OVERFLOW_INDENT_PX = 20;
 
-// Cap della label di riga (P3): le label osservate stanno fra 3 e 17
-// caratteri (`T67`, `T149`, `T67-calm-elephant`) più il ripiego `pid <n>`;
-// venti le tengono intere e restano rete per un titolo scritto a mano.
-const LABEL_MAX = 20;
+// Larghezza minima del popup, in pixel.
+//
+// Il tema dà `.popup-menu {min-width: 15em}`, che è un MINIMO e non un massimo:
+// il menu si stringe sul contenuto, e con titoli di conversazione lunghi il
+// risultato è una colonna di testo tagliato in un popup che avrebbe spazio per
+// allargarsi. Dichiararne uno più grande è quindi lecito e non combatte col
+// tema — gli indicatori che sembrano «più larghi» (il gestore degli appunti) lo
+// sono per la stessa ragione, hanno contenuto che chiede più spazio.
+//
+// Va sulla box del contenuto e come stile inline, per la stessa ragione
+// dell'indentazione sopra: una regola in `stylesheet.css` non si vedrebbe fino
+// al prossimo relogin.
+const MENU_MIN_WIDTH_PX = 480;
+
+// Cap della label di riga: RETE, non il criterio di taglio.
+//
+// Il taglio vero lo fa Pango, ellipsizzando nello spazio che la riga ha davvero
+// (vedi `sessionRow`): un numero fisso non può saperlo, e finché decideva lui
+// tagliava a venti caratteri anche quando il popup aveva spazio per il doppio.
+//
+// Il cap contava CODE UNIT, non caratteri visibili, ed è un secondo motivo per
+// non affidargli la decisione: un'emoji fuori dal piano base ne occupa due, così
+// `🧵 loom-works · T159 🚀 modale` perdeva quattro posizioni per due glifi. Ora
+// il valore serve solo a non passare a Pango una stringa assurda.
+const LABEL_MAX = 120;
 
 function truncateLabel(label) {
     if (label.length <= LABEL_MAX) return label;
     return label.slice(0, LABEL_MAX - 1) + '…';
+}
+
+// Toglie lo spazio dell'ornament da una voce di menu.
+//
+// Ogni `PopupBaseMenuItem` porta una `St.Icon` con classe `popup-menu-ornament`,
+// che il tema dimensiona a `width: 1.091em` — lo spazio del pallino o della
+// spunta a sinistra di una voce. Nelle voci di compass quell'ornament non è mai
+// valorizzato (lo stato sta in un glifo nostro, il dot del cappello), quindi
+// l'icona resta invisibile e occupa comunque la sua larghezza: sono ~16px
+// sottratti al testo su OGNI riga, cappello e conversazioni.
+//
+// `Ornament.HIDDEN` è il solo valore che la rende `visible = false`, e un attore
+// invisibile non chiede larghezza; `Ornament.NONE` si limita a svuotare il nome
+// dell'icona, lasciando lo spazio prenotato — è il valore di default, cioè
+// esattamente il regime da cui si parte.
+function hideOrnament(item) {
+    item.setOrnament(PopupMenu.Ornament.HIDDEN);
 }
 
 // ── Etichetta di sessione ────────────────────────────────────────────────────
@@ -96,6 +135,7 @@ export function sessionLabel(session, project) {
 // all'apertura del menu (l'handler `open-state-changed` lo chiama già da sé).
 export function buildMenu(self) {
     self.menu.removeAll();
+    self.menu.box.style = `min-width: ${MENU_MIN_WIDTH_PX}px;`;
     // cache usata anche da findNotificationWindow via self._winMap
     self._winMap = Desktop.resolveWindowMap(self._registry);
 
@@ -149,13 +189,13 @@ export function addLoomProject(self, project) {
         //  - popup-menu-item-expander (St.Bin x_expand): DUE figli x_expand
         //    (expander + la mia row) si spartiscono lo spazio → l'expander
         //    occupa metà a sinistra e spinge la row a destra = CENTRATO.
-        // Lascia solo l'ornament (indent standard ~22px, come le voci vecchie).
         if (item.label)        item.remove_child(item.label);
         if (item._triangleBin) item.remove_child(item._triangleBin);
         for (const c of item.get_children()) {
             if ((c.style_class ?? '').includes('popup-menu-item-expander'))
                 item.remove_child(c);
         }
+        hideOrnament(item);
         item.activate = (_event) => {};                             // il click sulla riga NON toggla
 
         // NIENTE animazione slide sul sotto-menu: apri/chiudi istantaneo.
@@ -201,6 +241,7 @@ export function addLoomProject(self, project) {
         // Senza launch → NIENTE sotto-menu: riga inerte (highlight su hover) coi
         // soli bottoni inline. `activate:false` → il click sulla riga non attiva.
         const item = new PopupMenu.PopupBaseMenuItem({activate: false});
+        hideOrnament(item);
         fillLoomHeader(self, item, project, wins, sessions);
         self.menu.addMenuItem(item);
     }
@@ -243,6 +284,7 @@ export function cappedSessions(sessions) {
 // cose è un BOTTONE dentro la riga, non la riga resa reattiva — vedi markToggle.
 export function sessionRow(self, session, project, marks) {
     const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false});
+    hideOrnament(item);
     const row  = new St.BoxLayout({
         style_class: 'compass-session-row',
         x_expand: true, x_align: Clutter.ActorAlign.FILL,
@@ -265,14 +307,22 @@ export function sessionRow(self, session, project, marks) {
 
     const state = Model.sessionState(session, self._channels);
     const glyph = Model.STATE_EMOJI[state] ?? '⚪';
-    row.add_child(new St.Label({
+
+    // L'etichetta ESPANDE e si ellipsizza da sé, e con questo fa anche il mestiere
+    // dello spacer che stava qui: prendendosi lo spazio in mezzo, spinge età e
+    // toggle a destra senza un attore vuoto che li separi.
+    //
+    // Il taglio passa così a Pango, che lo decide sulla larghezza REALE della
+    // riga. Prima lo decideva un cap di venti code unit, quindi tagliava anche
+    // quando il popup aveva spazio, e tagliava di più sui titoli con emoji —
+    // che è il caso normale, dato che ogni titolo di tab ne porta almeno una.
+    const label = new St.Label({
         text: `${glyph}  ${sessionLabel(session, project)}`,
         y_align: Clutter.ActorAlign.CENTER,
-    }));
-
-    // spacer — St.Widget vuoto che mangia lo spazio in mezzo. NON un bottone: un
-    // bottone intercetterebbe hover e click su tutta la parte vuota della riga.
-    row.add_child(new St.Widget({x_expand: true}));
+        x_expand: true,
+    });
+    label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    row.add_child(label);
 
     if (AGED_STATES.has(state))
         row.add_child(new St.Label({
