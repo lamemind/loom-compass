@@ -272,12 +272,20 @@ export function loadLiveSessions(channels) {
                 if (!ok) continue;
                 const s = JSON.parse(new TextDecoder().decode(bytes));
                 if (!s?.pid || !s?.cwd) continue;
-                // Il registro tiene un file anche per i processi spawnati
-                // dall'SDK (subagent, fork in background): stesso `cwd` del
-                // progetto, ma nessuna tab a cui tornare e nessuno `status`.
-                // Elencarli direbbe che l'utente ha aperte sessioni che non
-                // può raggiungere. Solo `cli` è una sessione interattiva vera.
+                // Il registro tiene un file anche per i processi che non sono
+                // una conversazione dell'utente: subagent SDK, fork parkeggiati
+                // in background, spare pty host. Hanno lo stesso `cwd` del
+                // progetto ma nessuna tab a cui tornare, ed elencarli direbbe
+                // che l'utente ha aperte sessioni che non può raggiungere.
+                //
+                // Servono DUE gate perché i due campi si sono separati: un job
+                // in background di Claude Code scrive `entrypoint:"cli"` come
+                // una sessione vera e si distingue solo per `kind:"bg"`. Il
+                // gate su `entrypoint` da solo lo lascia passare, e il pid è
+                // davvero vivo — quindi nemmeno il controllo su `procStart`
+                // lo scarta.
                 if ((s.entrypoint ?? 'cli') !== 'cli') continue;
+                if ((s.kind ?? 'interactive') !== 'interactive') continue;
                 if (procStarttime(s.pid) !== String(s.procStart)) continue;
                 live.push({
                     pid:       s.pid,
