@@ -20,30 +20,11 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 // Token di cache-busting propagato ai fratelli: `import.meta.url` lo porta, un
 // `import './x.js'` statico NO — il figlio resterebbe in cache per tutta la vita
-// del processo gnome-shell, e `compass reload` ricaricherebbe un file su quattro
+// del processo gnome-shell, e `compass reload` ricaricherebbe un file su cinque
 // producendo un grafo misto (impl nuovo + model vecchio) senza nessun errore.
 const _Q = import.meta.url.includes('?') ? '?' + import.meta.url.split('?')[1] : '';
 const Model   = await import('./model.js'   + _Q);
 const Desktop = await import('./desktop.js' + _Q);
-
-// ── Stato → emoji ────────────────────────────────────────────────────────────
-
-// `running` e `ask` non sono pallini colorati come gli altri tre: dicono COSA
-// sta succedendo, non un livello su una scala. Sono i due stati su cui si
-// decide se andare in quella tab, e un glifo figurativo si becca in periferia
-// dove un colore va confrontato con gli altri per essere letto.
-//
-// `⚙️` porta un VS16 (U+2699 U+FE0F): U+2699 da solo è text-default e
-// renderebbe come carattere tipografico monocromo. Qui il selettore si può
-// usare senza cautele — siamo in un St.Label sotto Pango, non in un terminale
-// dove la larghezza dichiarata e quella disegnata possono discordare.
-export const STATE_EMOJI = {
-    running: '⚙️',
-    ask:     '❓',
-    done:    '✅',
-    idle:    '⚪',
-    error:   '🔴',
-};
 
 // Cap di righe-sessione per progetto: oltre, una riga di riepilogo `+N`. Serve
 // perché il menu è una popup a lunghezza non limitata — dieci sessioni su un
@@ -55,10 +36,6 @@ const SESSION_ROWS_MAX = 6;
 // `running` non costa una riga in più. `idle` resta nudo: lì la cifra
 // direbbe solo da quanto non succede niente.
 const AGED_STATES = new Set(['running', 'ask', 'done']);
-
-// Glifo orologio unico e fisso per l'età (P4), non un set per stato. Porta un
-// VS16 esplicito (U+1F550 U+FE0F) con la stessa cautela di `⚙️` sopra.
-const CLOCK_EMOJI = '\u{1F550}️';
 
 // Glifi dei due toggle per-conversazione (T158): 🚨 priorità, 📌 pin. Il nome
 // della chiave È il nome del campo nel sidecar — la stessa stringa viaggia dal
@@ -107,18 +84,6 @@ export function sessionLabel(session, project) {
         }
     }
     return truncateLabel(label);
-}
-
-// `età-stato/età-conversazione` (D2, schizzo utente): il primo numero decide
-// se andare in quella tab adesso, il secondo dà solo il contesto della durata
-// della conversazione.
-//
-// Testo nudo, senza il ` · ` che lo saldava all'etichetta: da T158 l'età è
-// un'etichetta propria nel blocco destro della riga, e un separatore cablato
-// dentro il testo la lascerebbe appesa a un vicino che non ha più.
-function ageText(session) {
-    const {stateAgeMs, convoAgeMs} = Model.sessionAges(session, Date.now());
-    return `${CLOCK_EMOJI} ${Model.formatAge(stateAgeMs)}/${Model.formatAge(convoAgeMs)}`;
 }
 
 // ── Costruzione del menu ─────────────────────────────────────────────────────
@@ -299,7 +264,7 @@ export function sessionRow(self, session, project, marks) {
     row.style = `padding-left: ${ROW_INDENT_PX}px;`;
 
     const state = Model.sessionState(session, self._channels);
-    const glyph = STATE_EMOJI[state] ?? '⚪';
+    const glyph = Model.STATE_EMOJI[state] ?? '⚪';
     row.add_child(new St.Label({
         text: `${glyph}  ${sessionLabel(session, project)}`,
         y_align: Clutter.ActorAlign.CENTER,
@@ -311,7 +276,7 @@ export function sessionRow(self, session, project, marks) {
 
     if (AGED_STATES.has(state))
         row.add_child(new St.Label({
-            text: ageText(session),
+            text: Model.ageText(session),
             y_align: Clutter.ActorAlign.CENTER,
         }));
 
@@ -408,7 +373,7 @@ export function fillLoomHeader(self, item, project, wins, sessions = []) {
     // l'alpha, a segnalare "progetto non presente".
     const rollup = Model.loomRollupState(project, sessions, self._channels);
     const dot = new St.Label({
-        text: STATE_EMOJI[rollup] ?? '⚪',
+        text: Model.STATE_EMOJI[rollup] ?? '⚪',
         style_class: 'compass-dot',
         y_align: Clutter.ActorAlign.CENTER,
     });

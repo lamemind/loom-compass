@@ -444,10 +444,16 @@ export function sessionMarksPath(projectDir) {
     return GLib.build_filenamev([dir, '.claude', 'loom', 'session-tasks.jsonl']);
 }
 
-// sessionId → {priority, pinned}. LAST-WINS PER CAMPO, come il lettore del deck:
-// vince l'ultimo record che NOMINA il campo, e un record che non lo nomina non lo
-// tocca. `false` è quindi una smarcatura esplicita, non un'assenza — ed è il
-// motivo per cui il campo va letto col `typeof` e non per verità.
+// sessionId → {priority, pinned, note}. LAST-WINS PER CAMPO, come il lettore del
+// deck: vince l'ultimo record che NOMINA il campo, e un record che non lo nomina
+// non lo tocca. `false` è quindi una smarcatura esplicita, non un'assenza — ed è
+// il motivo per cui il campo va letto col `typeof` e non per verità.
+//
+// `note` segue la stessa regola con una cancellazione sua: la stringa VUOTA
+// toglie la chiave invece di lasciare una nota vuota. Chi legge non deve
+// distinguere «mai scritta» da «cancellata», perché a schermo sono la stessa
+// cosa — è la convenzione del deck, e cambiarla qui produrrebbe due letture
+// divergenti dello stesso file.
 export function loadSessionMarks(projectDir) {
     const marks = new Map();
     const path  = sessionMarksPath(projectDir);
@@ -470,20 +476,55 @@ export function loadSessionMarks(projectDir) {
         const cur = marks.get(d.sessionId) ?? {};
         if (typeof d.priority === 'boolean') cur.priority = d.priority;
         if (typeof d.pinned   === 'boolean') cur.pinned   = d.pinned;
+        if (typeof d.note     === 'string')  {
+            if (d.note) cur.note = d.note;
+            else        delete cur.note;
+        }
         marks.set(d.sessionId, cur);
     }
     return marks;
 }
 
-// Appende una marca. Il record porta il SOLO campo toccato, come fa il deck: uno
-// con due campi riscriverebbe anche quello che l'utente non ha premuto.
+// I campi del sidecar che compass può scrivere.
 //
-// Ritorna `true` solo se la riga è finita su disco, e il chiamante accende la UI
+// Whitelist e non una lista di cortesia: il file è un contratto fra TRE repo a
+// rilascio indipendente — il deck lo scrive, l'hook del plugin lo legge, compass
+// fa entrambe le cose — e i lettori ignorano in silenzio un campo che non
+// conoscono. Un campo scritto per errore non produrrebbe quindi nessun errore:
+// resterebbe nel file per sempre, letto da nessuno. Gli altri campi del record
+// (`taskId`, `forkOf`) appartengono a chi li scrive e compass non li tocca.
+const MARK_FIELDS = new Set(['priority', 'pinned', 'note']);
+
+// Appende UNA riga con tutti i campi passati.
+//
+// I campi vanno insieme in un record solo quando si toccano insieme: il lettore
+// risolve last-wins PER CAMPO, quindi tre record separati darebbero lo stesso
+// esito finale, ma lascerebbero tre istanti in cui lo stato su disco è a metà —
+// e in quel mezzo ci sta il poll del deck, che mostrerebbe la marca accesa e la
+// nota ancora vecchia.
+//
+// Simmetricamente, il record porta SOLO i campi che il chiamante nomina. Uno che
+// portasse anche i campi non toccati li riscriverebbe col valore che avevano
+// quando il pannello si è aperto, e il last-wins trasformerebbe quella
+// riscrittura in una sovrascrittura di ciò che un altro scrittore (il deck) ha
+// messo nel frattempo.
+//
+// Ritorna `true` solo se la riga è finita su disco, e il chiamante muove la UI
 // solo allora: un toggle che si illumina senza che il file cambi mentirebbe, e il
-// giro di menu successivo lo rimetterebbe indietro senza spiegare perché.
-export function writeSessionMark(projectDir, sessionId, field, value) {
+// giro di menu successivo lo rimetterebbe indietro senza spiegare perché. Un
+// insieme di campi VUOTO ritorna `true` senza scrivere: non c'è niente da fare,
+// e non è un fallimento.
+export function writeSessionMarks(projectDir, sessionId, fields) {
     const path = sessionMarksPath(projectDir);
     if (!path || !sessionId) return false;
+
+    const rec = {sessionId};
+    for (const [k, v] of Object.entries(fields ?? {})) {
+        if (MARK_FIELDS.has(k)) rec[k] = v;
+        else log(`[Compass] writeSessionMarks: campo "${k}" fuori contratto, scartato`);
+    }
+    if (Object.keys(rec).length === 1) return true; // solo sessionId: niente da scrivere
+
     try {
         const file = Gio.File.new_for_path(path);
         try {
@@ -491,19 +532,22 @@ export function writeSessionMark(projectDir, sessionId, field, value) {
         } catch (_e) {
             // già esistente: `make_directory_with_parents` solleva su EXISTS
         }
-        const rec = {
-            sessionId,
-            [field]: value,
-            ts: GLib.DateTime.new_now_utc().format_iso8601(),
-        };
+        rec.ts = GLib.DateTime.new_now_utc().format_iso8601();
         const os = file.append_to(Gio.FileCreateFlags.NONE, null);
         os.write_all(new TextEncoder().encode(JSON.stringify(rec) + '\n'), null);
         os.close(null);
         return true;
     } catch (e) {
-        logError(e, '[Compass] writeSessionMark');
+        logError(e, '[Compass] writeSessionMarks');
         return false;
     }
+}
+
+// Un campo solo — la forma che serve ai toggle del popup, dove ogni bottone è la
+// sua azione e scrive da sé. Delega, non duplica: una seconda composizione del
+// record divergerebbe dalla prima al primo campo aggiunto.
+export function writeSessionMark(projectDir, sessionId, field, value) {
+    return writeSessionMarks(projectDir, sessionId, {[field]: value});
 }
 
 // ── Età di una sessione (T149) ────────────────────────────────────────────
@@ -532,6 +576,50 @@ export function formatAge(ms) {
     const days = Math.floor(hours / 24);
     return `${days}g`;
 }
+
+// Glifo orologio unico e fisso per l'età (P4), non un set per stato. Porta un
+// VS16 esplicito (U+1F550 U+FE0F): senza, U+1F550 resta un carattere
+// tipografico monocromo. Il selettore si può usare senza cautele — siamo sotto
+// Pango, non in un terminale dove la larghezza dichiarata e quella disegnata
+// possono discordare.
+export const CLOCK_EMOJI = '\u{1F550}️';
+
+// `età-stato/età-conversazione` (D2, schizzo utente): il primo numero decide se
+// andare in quella tab adesso, il secondo dà solo il contesto della durata della
+// conversazione.
+//
+// Sta qui e non fra i widget perché la leggono DUE superfici — la riga-sessione
+// del popup e le righe del modale sulla conversazione in focus — e una seconda
+// composizione delle stesse due misure divergerebbe al primo aggiustamento di
+// formato, mostrando due età diverse per la stessa conversazione.
+//
+// Testo nudo, senza separatore in testa: chi lo rende decide da sé se saldarlo a
+// un vicino, e un ` · ` cablato qui lo lascerebbe appeso dove quel vicino non c'è.
+export function ageText(session) {
+    const {stateAgeMs, convoAgeMs} = sessionAges(session, Date.now());
+    return `${CLOCK_EMOJI} ${formatAge(stateAgeMs)}/${formatAge(convoAgeMs)}`;
+}
+
+// ── Stato → emoji ────────────────────────────────────────────────────────────
+
+// `running` e `ask` non sono pallini colorati come gli altri tre: dicono COSA
+// sta succedendo, non un livello su una scala. Sono i due stati su cui si decide
+// se andare in quella tab, e un glifo figurativo si becca in periferia dove un
+// colore va confrontato con gli altri per essere letto.
+//
+// `⚙️` porta un VS16 (U+2699 U+FE0F), con la stessa cautela di `CLOCK_EMOJI`.
+//
+// Tabella di RESA, in un file che per il resto tiene il dato — ci sta per la
+// stessa ragione di `ageText` sopra: la leggono il popup e il modale, e due copie
+// mostrerebbero due glifi diversi per lo stesso stato. Resta comunque un dato
+// senza widget attorno: nessun consumatore di model.js tocca St.
+export const STATE_EMOJI = {
+    running: '⚙️',
+    ask:     '❓',
+    done:    '✅',
+    idle:    '⚪',
+    error:   '🔴',
+};
 
 // Stato di UNA sessione, come cascata a due fonti (D3).
 //
