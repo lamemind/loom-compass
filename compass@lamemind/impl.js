@@ -232,8 +232,39 @@ class CompassIndicator extends PanelMenu.Button {
         }
         // Il canale vecchio resta alimentato: tiene il badge, il suono, la
         // notifica di `ask` e il rollup delle surface non-claude.
-        if (profileId) { this.setState(profileId, state); return; }
+        //
+        // La decisione sul suono si prende QUI e viaggia giù come parametro,
+        // perché questo è l'unico punto che ha il `sessionId` in mano: `setState`
+        // riceve il profilo del cappello, e con quello non può sapere QUALE delle
+        // N conversazioni del progetto ha cambiato stato. Leggere la marca dove il
+        // suono avviene sarebbe impossibile senza cambiare la firma — lì il dato
+        // non è mai arrivato.
+        if (profileId) {
+            this.setState(profileId, state, this._priorityMuted(profileId, sessionId, state));
+            return;
+        }
         this._refreshMenu();
+    }
+
+    // Il suono di PROGETTO va taciuto? Sì solo quando la conversazione che ha
+    // cambiato stato è marcata prioritaria: lì il ding lo emette l'hook del
+    // plugin, per-conversazione, e quello di compass sarebbe il secondo.
+    //
+    // Tace il SOLO suono. Il banner di `ask` di compass appare sempre, marca o no:
+    // porta il bottone «Vai» che focussa la finestra, e `notify-send` non può
+    // offrirlo — nessun processo resta in ascolto del click dopo che l'hook è
+    // uscito. Su un `ask` di conversazione marcata i banner sono quindi due per
+    // decisione: quello di compass dice dove andare, quello dell'hook quale
+    // conversazione è.
+    //
+    // Il sidecar si legge solo sugli stati che suonano: `running` e `end` non
+    // producono audio, e un file aperto per loro sarebbe I/O a vuoto a ogni turno.
+    _priorityMuted(profileId, sessionId, state) {
+        if (!sessionId) return false;
+        if (state !== 'done' && state !== 'ask') return false;
+        const project = Model.projectByBinding(this._loomRegistry, profileId);
+        if (!project) return false;
+        return Model.loadSessionMarks(project.dir).get(sessionId)?.priority === true;
     }
 
     // Ricostruzione a seguito di un annuncio D-Bus: il registro dei processi va
@@ -246,7 +277,13 @@ class CompassIndicator extends PanelMenu.Button {
         this._updateBadge();
     }
 
-    setState(profileId, state) {
+    // `muteSound` arriva solo dal canale per-sessione, che sa a quale
+    // conversazione appartiene lo stato. Sul canale vecchio (`SetState`, senza
+    // `sessionId`) il parametro resta assente e quindi falso: la soppressione non
+    // è decidibile, e il suono parte come ha sempre fatto. È una degradazione
+    // muta, non un errore — chi ha un bridge più vecchio del plugin sente due
+    // ding sulla conversazione marcata, non zero.
+    setState(profileId, state, muteSound = false) {
         const project = this._registry.find(p => p.profile === profileId);
         // Il profilo è "conosciuto" se è nel registry vecchio (projects.json) OPPURE
         // se è un binding di un cappello loom (dconf). Così lo stato via D-Bus popola
@@ -282,9 +319,10 @@ class CompassIndicator extends PanelMenu.Button {
         // però lo vedi solo se il menu lo apri.
         if (project || loomProject) {
             if (state === 'done' && prevState !== 'done') {
-                Desktop.playSound('complete');
+                if (!muteSound) Desktop.playSound('complete');
             } else if (state === 'ask' && prevState !== 'ask') {
-                Desktop.playSound('bell');
+                if (!muteSound) Desktop.playSound('bell');
+                // Fuori dal mute per decisione: il banner con «Vai» appare sempre.
                 this._showNotification(project, loomProject);
             }
         }
