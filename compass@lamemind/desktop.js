@@ -134,20 +134,38 @@ export function findWindowForProject(winMap, legacyRegistry, project) {
 export function resolveLoomWindows(loomRegistry, wins = getPtyxisWindows()) {
     const map = new Map();
     for (const win of wins) {
-        const title = win.get_title() ?? '';
-        let best = null, bestLen = 0;
-        for (const p of loomRegistry) {
-            if (p.name.length <= bestLen) continue;
-            if (!titleKeyRe(p.name).test(title)) continue;
-            bestLen = p.name.length;
-            best    = p;
-        }
+        const best = projectForTitle(win.get_title() ?? '', loomRegistry);
         if (!best) continue;
         if (!map.has(best.id)) map.set(best.id, {win: null});
         const e = map.get(best.id);
         if (!e.win) e.win = win;
     }
     return map;
+}
+
+// Il longest-match titolo → progetto, da solo: prende UN titolo e ritorna il
+// cappello che lo rivendica, o `null`.
+//
+// Estratto dal ciclo di `resolveLoomWindows`, che lo riusa — non una seconda
+// copia della regola. Serve estratto perché la risoluzione della conversazione
+// in focus (T159) parte da UNA finestra, non da tutte: passare per la mappa
+// completa vorrebbe dire costruirla e poi cercarci dentro la finestra che si
+// aveva già in mano, e la mappa tiene solo la PRIMA finestra per progetto —
+// quella in focus potrebbe non esserci affatto.
+//
+// Puro e collaudabile con un titolo finto e un registro finto, senza
+// compositore. Le tre cautele del match (ancora `^`, emoji generica, lookahead
+// `(?![\w-])`, longest-match sul `name` e non sul titolo) stanno nel commento di
+// `resolveLoomWindows` sopra e valgono identiche qui: è lo stesso codice.
+export function projectForTitle(title, loomRegistry) {
+    let best = null, bestLen = 0;
+    for (const p of loomRegistry) {
+        if (p.name.length <= bestLen) continue;
+        if (!titleKeyRe(p.name).test(title)) continue;
+        bestLen = p.name.length;
+        best    = p;
+    }
+    return best;
 }
 
 // ── Surface di default ───────────────────────────────────────────────────────

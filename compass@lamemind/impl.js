@@ -4,16 +4,17 @@
 // GNOME Shell 45+ (ES modules). Chiave sessione v1 = PTYXIS_PROFILE.
 //
 // È la RADICE del grafo dei moduli: ciclo di vita e stato dell'istanza, canale
-// D-Bus in ingresso, badge/suono/notifica in uscita. I tre fratelli non lo
+// D-Bus in ingresso, badge/suono/notifica in uscita. I quattro fratelli non lo
 // importano mai — la dipendenza va in un verso solo:
 //
-//     impl.js  →  menu.js  →  {model.js, desktop.js}
+//     impl.js  →  {menu.js, dialog.js}  →  {model.js, desktop.js}
 //
 //   model.js    il dato: registri, registro dei processi vivi, stato, rollup
 //   desktop.js  le finestre e i processi: match, focus, coalescing, spawn, suono
-//   menu.js     i widget: voce di menu, righe-sessione, bottoni surface
+//   menu.js     i widget del popup: voce di menu, righe-sessione, bottoni surface
+//   dialog.js   il modale sulla conversazione in focus, e la sua risoluzione
 //
-// Qui resta ciò che non può uscire: dove lo stato dell'istanza vive e dove i tre
+// Qui resta ciò che non può uscire: dove lo stato dell'istanza vive e dove i
 // moduli vengono cablati fra loro.
 
 import GLib from 'gi://GLib';
@@ -53,6 +54,7 @@ const _Q = import.meta.url.includes('?') ? '?' + import.meta.url.split('?')[1] :
 const Model   = await import('./model.js'   + _Q);
 const Desktop = await import('./desktop.js' + _Q);
 const Menu    = await import('./menu.js'    + _Q);
+const Dialog  = await import('./dialog.js'  + _Q);
 
 // ── Scorciatoia globale ──────────────────────────────────────────────────────
 
@@ -438,15 +440,16 @@ class CompassIndicator extends PanelMenu.Button {
         this._loomRegistry = Model.loadLoomRegistry();
         this._liveSessions = Model.loadLiveSessions(this._channels);
 
-        // PROBE T159/P1 — titolo della finestra in focus e `name` delle sessioni
-        // vive, fianco a fianco. Serve a provare l'uguaglianza fra i due su cui
-        // poggia la risoluzione: la TESTA del titolo è provata dal matcher in
-        // esercizio, la coda no, e un delta lì renderebbe il confronto sempre
-        // falso senza produrre nessun errore.
-        const win = global.display.get_focus_window();
-        log(`[Compass] probe focus: wm_class=${win?.get_wm_class() ?? '(nessuna finestra)'} title=${JSON.stringify(win?.get_title() ?? null)}`);
-        for (const s of this._liveSessions)
-            log(`[Compass] probe live: pid=${s.pid} name=${JSON.stringify(s.name)} cwd=${s.cwd}`);
+        const target = Dialog.focusedSessions(this._loomRegistry, this._liveSessions);
+
+        // Log dell'esito della risoluzione, a ogni pressione: è il collaudo di
+        // una catena che non ha nessun altro modo di dichiarare cosa ha visto —
+        // zero candidate e una candidata sbagliata si presentano entrambe come
+        // un modale che non fa quello che aspetti.
+        log(`[Compass] focus → title=${JSON.stringify(target.title)} ` +
+            `project=${target.project?.id ?? '(nessuno)'} ` +
+            `candidate=${target.sessions.length} ` +
+            `[${target.sessions.map(s => `${s.pid}:${JSON.stringify(s.name)}`).join(' ')}]`);
     }
 
     // ── Cleanup ──────────────────────────────────────────────────────────────

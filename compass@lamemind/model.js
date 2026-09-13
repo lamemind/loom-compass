@@ -241,6 +241,84 @@ export function procStarttime(pid) {
     }
 }
 
+// Argomenti del processo, come array. `/proc/<pid>/cmdline` li tiene separati
+// da NUL e ne mette uno anche in coda, da cui l'elemento vuoto finale da
+// scartare. Ogni argomento arriva quindi INTERO, spazi compresi: non c'è nessun
+// quoting da disfare, a differenza di una riga di comando ricostruita.
+export function procCmdline(pid) {
+    try {
+        const [ok, bytes] = GLib.file_get_contents(`/proc/${pid}/cmdline`);
+        if (!ok) return null;
+        const argv = new TextDecoder().decode(bytes).split('\0');
+        if (argv.length && argv[argv.length - 1] === '') argv.pop();
+        return argv;
+    } catch (_e) {
+        return null; // processo morto, o non nostro: non è un errore
+    }
+}
+
+// Il nome CHIESTO alla nascita del processo — il valore di `--name` (o del suo
+// alias `-n`) negli argomenti — oppure `null` se non è stato chiesto niente.
+//
+// Non è un doppione del campo `name` del registro, ed è la ragione per cui
+// serve: il registro porta il nome EFFETTIVO, che Claude Code può aver cambiato.
+// Quando il nome chiesto è già preso da un'altra sessione il CLI lo rinomina
+// appendendogli un suffisso (`🧵 loom-works` → `🧵 loom-works-cryptic-hopper`) e
+// dichiara l'accaduto nel campo `nameSource: "collision"` — ma il TITOLO del
+// terminale resta il nome chiesto, perché lo compone l'argomento, non il
+// registro. Il caso non è di margine: due conversazioni sulla stessa task hanno
+// lo stesso `--name` per costruzione, quindi una delle due è sempre rinominata.
+//
+// Chi deve risalire dal titolo di una finestra alla conversazione confronta
+// perciò col nome chiesto, non col nome effettivo. La via alternativa —
+// riconoscere la forma del suffisso — è un'euristica su un dettaglio interno del
+// CLI che cambia fra i suoi percorsi (le sessioni in background usano ` (2)`,
+// non un suffisso di parole), mentre l'argomento è la stessa stringa che compone
+// il titolo: un'uguaglianza, non una somiglianza.
+export function procRequestedName(pid) {
+    const argv = procCmdline(pid);
+    if (!argv) return null;
+    for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === '--name' || a === '-n') return argv[i + 1] ?? null;
+        if (a.startsWith('--name=')) return a.slice('--name='.length);
+        if (a.startsWith('-n='))     return a.slice('-n='.length);
+    }
+    return null;
+}
+
+// Le sessioni il cui titolo di tab è `title` — un INSIEME, non un valore.
+//
+// Due conversazioni sulla stessa task senza nota producono la stessa stringa:
+// il titolo è composto da emoji di progetto, nome, task ed eventuale nota, e gli
+// elementi che distinguerebbero due sorelle sono proprio quelli opzionali.
+// Restituire la prima candidata scriverebbe l'azione sulla conversazione
+// sbagliata senza che nessuno se ne accorga, quindi l'ambiguità esce da qui e la
+// risolve chi ha una UI per chiederlo.
+//
+// Due confronti, entrambi per uguaglianza intera. Mai per prefisso: con
+// `🧵 loom-works` in focus, un prefisso renderebbe candidata anche
+// `🧵 loom-works · T159`, che è un'altra conversazione.
+//   1. il nome EFFETTIVO del registro — copre la sessione il cui nome è quello
+//      che ha chiesto, cioè il caso normale;
+//   2. il nome CHIESTO negli argomenti — copre la sessione che il CLI ha
+//      rinominato per collisione (vedi procRequestedName), il cui titolo di tab
+//      è comunque il nome chiesto.
+// Il secondo si paga solo quando il primo fallisce, quindi il caso normale non
+// legge nessun file.
+//
+// `requestedNameOf` è un parametro con default e non una chiamata cablata: col
+// parametro esplicito il filtro si collauda con nomi finti, senza processi vivi
+// e senza `/proc`.
+export function sessionsByName(sessions, title, requestedNameOf = procRequestedName) {
+    const want = (title ?? '').trim();
+    if (!want) return [];
+    return sessions.filter(s =>
+        (s.name ?? '').trim() === want ||
+        (requestedNameOf(s.pid) ?? '').trim() === want
+    );
+}
+
 // Il file resta su disco dopo un `kill -9`, e il pid può essere riciclato da
 // un processo estraneo: la sola presenza del file non prova niente. Vivo =
 // /proc esiste E il suo `starttime` combacia con il `procStart` registrato.
