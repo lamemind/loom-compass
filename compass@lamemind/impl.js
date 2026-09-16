@@ -172,10 +172,11 @@ class CompassIndicator extends PanelMenu.Button {
         this._loomWins           = null; // cache window-map (project-level) progetti loom
         this._scroll             = null; // St.ScrollView del popup — montata una volta (Menu.mountScroll)
         this._section            = null; // PopupMenuSection dentro la scroll: qui buildMenu costruisce
-        // Sotto-menu del giro corrente, `<projectId>:<pinned|launch>` → PopupSubMenu.
-        // Ricostruita da `buildMenu` insieme ai widget che indicizza.
+        // Rami espandibili del giro corrente, `<projectId>:<pinned|launch>` →
+        // `{section, arrow}`. Ricostruita da `buildMenu` insieme ai widget che
+        // indicizza.
         this._subs               = new Map();
-        // L'UNICO sotto-menu aperto, come chiave — non come widget: `buildMenu`
+        // L'UNICO ramo aperto, come chiave — non come widget: `buildMenu`
         // parte da `removeAll()` e gira a ogni annuncio di stato, quindi ciò che
         // deve sopravvivere a una ricostruzione non può vivere in un attore.
         this._openSub            = null;

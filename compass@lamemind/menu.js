@@ -114,37 +114,33 @@ function hideOrnament(item) {
     item.setOrnament(PopupMenu.Ornament.HIDDEN);
 }
 
-// ── Sotto-menu costruiti a mano ──────────────────────────────────────────────
+// ── Rami espandibili del cappello ────────────────────────────────────────────
 //
-// Il cappello di un progetto porta DUE sotto-menu — le conversazioni pinnate e
-// le voci launch — e nessuno dei due può essere una `PopupSubMenuMenuItem`: ne
-// servirebbero due, cioè due righe in più per ogni progetto, quando la riga del
-// cappello esiste già e ha spazio per due chevron.
+// Il cappello di un progetto porta DUE rami espandibili — le conversazioni
+// pinnate e le voci launch — e nessuno dei due è un `PopupSubMenu`.
 //
-// Un `PopupSubMenu` si costruisce quindi a mano, e lo shell allora non fa più
-// tre cose che per una `PopupSubMenuMenuItem` fa da sé:
+// NON è un `PopupSubMenu` perché quello È una `St.ScrollView`, e il popup di
+// compass ne ha già una attorno a tutto il contenuto (§mountScroll). Due
+// ScrollView annidate si contendono lo spazio verticale, e la interna perde
+// sempre: una ScrollView ha altezza MINIMA indipendente dal contenuto — è tutto
+// il suo valore, ed è la ragione per cui la esterna funziona — quindi quando lo
+// spazio stringe è lei a cedere fino a zero invece di far scorrere la esterna.
+// Due guasti osservati, uno per verso:
+//  - popup vicino al tetto ma non oltre → il ramo si apre dentro i pixel che
+//    avanzano e scrolla per conto suo, cioè è illeggibile;
+//  - popup già oltre il tetto → il ramo non prende altezza affatto e appare
+//    vuoto, pur avendo righe dentro.
+// Con una `PopupMenuSection` — il cui attore è una `St.BoxLayout` — il ramo
+// chiede la propria altezza naturale, e a scorrere è sempre e solo la
+// ScrollView esterna, come già per le righe-sessione.
 //
-//  ① `addMenuItem` inserisce l'attore del sotto-menu nel box subito dopo la
-//     riga e chiama `_setParent`. A mano: `box.add_child(sub.actor)` nell'ordine
-//     giusto e `sub._setParent(self.menu)` — senza il parent, `_getTopMenu()`
-//     torna il sotto-menu stesso e il calcolo del tetto d'altezza legge il tema
-//     dell'attore sbagliato.
-//  ② `removeAll()` distrugge solo i figli il cui `_delegate` è una
-//     `PopupBaseMenuItem` o una `PopupMenuSection`. L'attore di un
-//     `PopupSubMenu` non è nessuna delle due, quindi sopravvivrebbe a ogni
-//     ricostruzione del menu accumulandosi nel box. Rimedio: il sotto-menu
-//     muore col suo item (`item.connect('destroy', …)`), che `removeAll()`
-//     distrugge — lo stesso cablaggio che `PopupSubMenuMenuItem` si fa nel
-//     costruttore.
-//  ③ `_setOpenedSubMenu` — la regola «uno aperto alla volta» — scatta dal
-//     `_subMenuOpenStateChanged` di una `PopupSubMenuMenuItem`, mai da un
-//     `PopupSubMenu` nudo. La tiene quindi compass, in `self._openSub`.
+// NON è una `PopupSubMenuMenuItem` perché ne servirebbero due per progetto,
+// cioè due righe in più per ognuno, quando la riga del cappello esiste già e ha
+// spazio per due chevron.
 //
-// La freccia passata al costruttore è OBBLIGATORIA e deve essere un attore
-// reale: `open`/`close` ne animano `rotation_angle_z` senza controllare che
-// esista. È anche l'unico indicatore di stato del chevron — nessuno scambio di
-// `icon_name`: `pan-end-symbolic` ruotata di 90° è già la freccia in giù, ed è
-// come lo shell disegna le proprie.
+// Aperto/chiuso è quindi `visible` della sezione, e lo stato del chevron è la
+// rotazione della freccia — `pan-end-symbolic` ruotata di 90° è già la freccia
+// in giù, ed è come lo shell disegna le proprie.
 
 /** Pivot della rotazione della freccia, come nei sotto-menu dello shell: senza,
  *  la rotazione avviene attorno all'angolo in alto a sinistra e la freccia
@@ -152,14 +148,15 @@ function hideOrnament(item) {
 const ARROW_PIVOT = new Graphene.Point({x: 0.5, y: 0.6});
 
 /**
- * Costruisce un chevron e il suo sotto-menu, e li aggancia alla riga.
+ * Costruisce un chevron e il ramo che apre, e aggancia il chevron alla riga.
  *
  * `label` non vuota → il bottone porta testo davanti alla freccia (`📌 5`);
  * vuota → la sola freccia, come il chevron delle launch.
  *
- * Il chevron va aggiunto SOLO se il sotto-menu avrà delle righe: `open()`
- * rifiuta un sotto-menu vuoto, e un bottone che non fa niente è peggio di un
- * bottone assente. Il chiamante lo sa prima di costruire — decide lui.
+ * Ritorna la sezione, CHIUSA: montarla nel menu tocca al chiamante, che sa
+ * dove va nell'ordine delle voci. Il chevron va aggiunto solo se il ramo avrà
+ * delle righe — un bottone che apre il vuoto è peggio di un bottone assente — e
+ * quello lo sa il chiamante, che decide prima di costruire.
  */
 function attachSubMenu(self, item, row, key, label) {
     const arrow = new St.Icon({
@@ -184,67 +181,68 @@ function attachSubMenu(self, item, row, key, label) {
         y_align: Clutter.ActorAlign.CENTER,
     });
 
-    const sub = new PopupMenu.PopupSubMenu(item, arrow);
-    sub._setParent(self.menu); // ① senza questo `_getTopMenu()` torna `sub`
-    // NIENTE animazione slide, come già per le launch: `open`/`close` animano
-    // quando `animate` è truthy, e `toggle()` ne passa uno. L'override è
-    // sull'ISTANZA e dipende dal solo contratto stabile «animate falsy →
-    // nessun ease», non dai rami interni della classe.
-    const _open  = sub.open.bind(sub);
-    const _close = sub.close.bind(sub);
-    sub.open  = () => _open(false);
-    sub.close = () => _close(false);
-    // ② il sotto-menu muore col suo item, o `removeAll()` lo lascia nel box
-    item.connect('destroy', () => sub.destroy());
+    const section = new PopupMenu.PopupMenuSection();
+    // La classe del tema dà al ramo il rientro e il fondo dei sotto-menu dello
+    // shell: la resa resta quella attesa anche senza la ScrollView che la
+    // portava.
+    section.actor.add_style_class_name('popup-sub-menu');
+    section.actor.hide();
 
-    self._subs.set(key, sub);
+    self._subs.set(key, {section, arrow});
     chevron.connect('clicked', () => toggleSubMenu(self, key));
     row.add_child(chevron);
-    return sub;
+    return section;
+}
+
+// Apre o chiude un ramo. Nessuna animazione: aprire e chiudere sono istantanei,
+// come già erano le launch.
+function setSubMenuOpen(entry, open) {
+    if (!entry) return;
+    entry.section.actor.visible = open;
+    entry.arrow.rotation_angle_z = open ? 90 : 0;
 }
 
 /**
- * ③ «Uno aperto alla volta, e sopravvive alla ricostruzione».
+ * «Uno aperto alla volta, e sopravvive alla ricostruzione».
  *
  * Lo stato sta in UNA chiave dell'indicatore (`self._openSub`,
  * `<projectId>:<pinned|launch>`) e non nei widget, perché i widget non
  * sopravvivono: `buildMenu` parte da `removeAll()` e gira a ogni annuncio di
  * stato di qualunque conversazione, anche mentre il popup è aperto e sotto il
- * puntatore. Un sotto-menu espanso sparirebbe al primo `Stop` di un'altra
- * sessione.
+ * puntatore. Un ramo espanso sparirebbe al primo `Stop` di un'altra sessione.
  *
- * Aprire chiude quello aperto, di qualunque progetto e tipo. La chiave si
- * scrive solo se il sotto-menu si è davvero aperto: `open()` rifiuta un
- * sotto-menu vuoto, e registrare una chiave per un sotto-menu chiuso
- * lascerebbe il popup convinto di avere qualcosa di aperto.
+ * La regola «uno alla volta» la tiene compass e non lo shell: quella dello
+ * shell (`_setOpenedSubMenu`) scatta dal `_subMenuOpenStateChanged` di una
+ * `PopupSubMenuMenuItem`, che qui non c'è.
+ *
+ * Aprire chiude quello aperto, di qualunque progetto e tipo.
  */
 function toggleSubMenu(self, key) {
     const aperto = self._openSub;
-    if (aperto && aperto !== key) self._subs.get(aperto)?.close();
+    if (aperto && aperto !== key) setSubMenuOpen(self._subs.get(aperto), false);
     if (aperto === key) {
-        self._subs.get(key)?.close();
+        setSubMenuOpen(self._subs.get(key), false);
         self._openSub = null;
         return;
     }
-    const sub = self._subs.get(key);
-    if (!sub) return;
-    sub.open();
-    self._openSub = sub.isOpen ? key : null;
+    const entry = self._subs.get(key);
+    if (!entry) return;
+    setSubMenuOpen(entry, true);
+    self._openSub = key;
 }
 
-// Riapre il sotto-menu che la chiave nomina, dopo che `buildMenu` ha ricostruito
-// i widget. Chiave che non trova più un sotto-menu (progetto sparito dal
-// registry, pinnate finite) → si dimentica, invece di restare appesa a indicare
-// qualcosa che non esiste.
+// Riapre il ramo che la chiave nomina, dopo che `buildMenu` ha ricostruito i
+// widget. Chiave che non trova più un ramo (progetto sparito dal registry,
+// pinnate finite) → si dimentica, invece di restare appesa a indicare qualcosa
+// che non esiste.
 function restoreOpenSubMenu(self) {
     if (!self._openSub) return;
-    const sub = self._subs.get(self._openSub);
-    if (!sub) {
+    const entry = self._subs.get(self._openSub);
+    if (!entry) {
         self._openSub = null;
         return;
     }
-    sub.open();
-    if (!sub.isOpen) self._openSub = null;
+    setSubMenuOpen(entry, true);
 }
 
 /**
@@ -363,8 +361,8 @@ export function buildMenu(self) {
     // il contenitore scorrevole montato una volta sola da mountScroll, e da lì in
     // poi le voci tornerebbero a impilarsi fuori schermo.
     self._section.removeAll();
-    // I sotto-menu del giro precedente sono morti coi loro item: il registro
-    // riparte vuoto, o `toggleSubMenu` aprirebbe un attore distrutto.
+    // I rami del giro precedente sono stati distrutti da `removeAll()`: il
+    // registro riparte vuoto, o `toggleSubMenu` toccherebbe un attore morto.
     self._subs = new Map();
     self.menu.box.style = `min-width: ${MENU_MIN_WIDTH_PX}px;`;
     self._scroll.style  = `max-height: ${scrollMaxHeight()}px;`;
@@ -444,16 +442,17 @@ export function addLoomProject(self, project) {
 
     self._section.addMenuItem(item);
 
-    // Gli attori dei sotto-menu vanno nel box SUBITO DOPO la riga, nell'ordine
-    // dei chevron: è ciò che `addMenuItem` fa da sé per una
-    // `PopupSubMenuMenuItem` e che qui tocca a noi (① di §Sotto-menu).
+    // I rami vanno SUBITO DOPO la riga, nell'ordine dei chevron. Passano da
+    // `addMenuItem` come ogni altra voce: è ciò che li fa distruggere da
+    // `removeAll()` alla ricostruzione e li rende visibili alla navigazione da
+    // tastiera del popup.
     if (pinnedSub) {
-        self._section.box.add_child(pinnedSub.actor);
+        self._section.addMenuItem(pinnedSub);
         for (const p of pinned)
             pinnedSub.addMenuItem(pinnedRow(self, project, p));
     }
     if (launchSub) {
-        self._section.box.add_child(launchSub.actor);
+        self._section.addMenuItem(launchSub);
         // voci launch (custom) → command @project-root, fire-once
         for (const launch of project.launch) {
             const label = launch.label || launch.command;
