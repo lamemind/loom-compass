@@ -147,6 +147,12 @@ function hideOrnament(item) {
  *  scappa fuori dal bottone. */
 const ARROW_PIVOT = new Graphene.Point({x: 0.5, y: 0.6});
 
+/** Rientro di un ramo espandibile, in pixel. Più marcato di `ROW_INDENT_PX`
+ *  delle righe-sessione: quelle stanno nel menu principale e il rientro le
+ *  subordina al cappello, un ramo invece deve leggersi come un blocco a parte
+ *  anche senza il fondo che il tema gli darebbe. */
+const SUBMENU_INDENT_PX = 16;
+
 /**
  * Costruisce un chevron e il ramo che apre, e aggancia il chevron alla riga.
  *
@@ -182,10 +188,13 @@ function attachSubMenu(self, item, row, key, label) {
     });
 
     const section = new PopupMenu.PopupMenuSection();
-    // La classe del tema dà al ramo il rientro e il fondo dei sotto-menu dello
-    // shell: la resa resta quella attesa anche senza la ScrollView che la
-    // portava.
-    section.actor.add_style_class_name('popup-sub-menu');
+    // Il rientro marca il ramo, e lo marca da solo: la classe `popup-sub-menu`
+    // del tema porterebbe anche un FONDO, e quel fondo schiaccia il contrasto
+    // del testo — le righe del ramo vivono già dentro `.compass-session-row`,
+    // che le tiene a opacità 0.85, e sopra un fondo più chiaro il risultato non
+    // si legge. Lo stile è inline e non in `stylesheet.css` perché lo
+    // stylesheet resta in cache nel loader fino al prossimo relogin.
+    section.actor.style = `padding-left: ${SUBMENU_INDENT_PX}px;`;
     section.actor.hide();
 
     self._subs.set(key, {section, arrow});
@@ -511,12 +520,24 @@ export function pinnedLabel(sessionId, mark) {
  * Riga di una conversazione pinnata: `glifo etichetta` a sinistra, il toggle
  * 📌 a destra.
  *
- * Due assi distinti sullo stesso significato, come sulla riga del cappello:
- *  - il GLIFO dice se la conversazione sta girando (lo stato, se viva) o no
- *    (`○`);
- *  - l'OPACITÀ dice la presenza sulla scala già in uso nel menu — 255 viva,
- *    110 con ripristino su hover per una morta, che è esattamente il «assente
- *    ma raggiungibile, il click la apre» del bottone-nome.
+ * Il glifo porta lo stato: quello della conversazione se è viva, `○` se non
+ * sta girando. È l'unico asse, e la presenza NON la ridice anche l'opacità:
+ * queste righe stanno già dentro `.compass-session-row`, che le tiene a 0.85,
+ * e un secondo fader in serie (110/255 ≈ 0.43) le porta a un terzo
+ * dell'opacità piena — testo che non si legge, invece di testo attenuato.
+ *
+ * CLICCABILE SOLO SE NON È VIVA. Una riga viva è inerte per la stessa
+ * decisione che tiene inerti le righe-sessione del cappello: la tab esatta non
+ * è raggiungibile (Ptyxis non espone targeting per-tab), quindi l'unica azione
+ * possibile sarebbe focussare la finestra del progetto — che è già il mestiere
+ * del bottone-nome, e offrirla su N righe la duplica. Sulla morta invece il
+ * click ha un'azione sua, che nessun altro bottone del menu fa: riaprire
+ * QUELLA conversazione.
+ *
+ * Il rischio che questo chiude non è estetico: una conversazione viva la cui
+ * riga si lascia cliccare può finire ripresa una seconda volta, e due processi
+ * `claude` che scrivono lo stesso transcript sono due scrittori sullo stesso
+ * file.
  *
  * Il toggle è 📌 e non 🚨: spinnare è l'unica azione che ha senso su una riga
  * che potrebbe essere morta, e senza il toggle qui l'unico modo di spinnare una
@@ -544,65 +565,55 @@ export function pinnedRow(self, project, entry) {
     });
     label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
 
-    // L'etichetta dentro un BOTTONE, non nuda: è l'azione della riga (focus se
-    // viva, ripresa se morta), e un `St.Button` reattivo figlio di una riga
-    // `reactive: false` riceve il click — la non-reattività del padre toglie dal
-    // pick il solo padre, non il sottoalbero (misurato per i toggle di T158).
-    //
-    // La label va in una `St.BoxLayout` dentro il bottone, non come figlia
-    // diretta: `St.Button` è un `St.Bin` e CENTRA il proprio figlio quando ha
-    // spazio extra, ignorando l'allineamento chiesto — il titolo finirebbe in
-    // mezzo alla riga. Una box invece rispetta l'espansione, quindi la label
-    // riempie da sinistra e si ellipsizza sulla larghezza vera.
-    const box = new St.BoxLayout({x_expand: true, x_align: Clutter.ActorAlign.FILL});
-    box.add_child(label);
-    const openBtn = new St.Button({
-        style_class: 'compass-surface-btn',
-        // Il padding della classe è tarato sui bottoni del cappello: su una riga
-        // di conversazione sfonderebbe l'altezza. Lo stile inline batte quello
-        // della classe sulla sola proprietà che nomina, quindi l'evidenziazione
-        // su hover resta.
-        style: 'padding: 1px 4px;',
-        child: box,
-        x_expand: true,
-        can_focus: true, track_hover: true,
-        y_align: Clutter.ActorAlign.CENTER,
-    });
-    // Fade di PRESENZA, la stessa scala del resto del menu: 255 = la
-    // conversazione sta girando, 110 con ripristino su hover = non c'è ma il
-    // click la riapre. È esattamente la semantica che il bottone-nome del
-    // cappello dà a quei due valori.
-    if (!session) {
-        openBtn.opacity = 110;
-        openBtn.connect('notify::hover', () => { openBtn.opacity = openBtn.hover ? 255 : 110; });
-    }
+    if (session) {
+        // Viva → etichetta nuda, nessun bottone: niente da cliccare, quindi
+        // niente da cliccare due volte.
+        row.add_child(label);
+    } else {
+        // L'etichetta dentro un BOTTONE: un `St.Button` reattivo figlio di una
+        // riga `reactive: false` riceve il click — la non-reattività del padre
+        // toglie dal pick il solo padre, non il sottoalbero (misurato per i
+        // toggle di T158).
+        //
+        // La label va in una `St.BoxLayout` dentro il bottone, non come figlia
+        // diretta: `St.Button` è un `St.Bin` e CENTRA il proprio figlio quando
+        // ha spazio extra, ignorando l'allineamento chiesto — il titolo
+        // finirebbe in mezzo alla riga. Una box invece rispetta l'espansione,
+        // quindi la label riempie da sinistra e si ellipsizza sulla larghezza
+        // vera.
+        const box = new St.BoxLayout({x_expand: true, x_align: Clutter.ActorAlign.FILL});
+        box.add_child(label);
+        const openBtn = new St.Button({
+            style_class: 'compass-surface-btn',
+            // Il padding della classe è tarato sui bottoni del cappello: su una
+            // riga di conversazione sfonderebbe l'altezza. Lo stile inline
+            // batte quello della classe sulla sola proprietà che nomina,
+            // quindi l'evidenziazione su hover resta — ed è quella, non
+            // un'opacità, a dire che la riga è azionabile.
+            style: 'padding: 1px 4px;',
+            child: box,
+            x_expand: true,
+            can_focus: true, track_hover: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
 
-    const findProjectWindow = projectWindowResolver(self, project);
-    openBtn.connect('clicked', () => {
-        // Il ts del click va catturato PRIMA di chiudere il menu: la chiusura
-        // rilascia il grab e rifocussa la finestra pre-menu, e senza il
-        // timestamp di un evento valido Mutter ignora l'activate che segue.
-        const ts = global.get_current_time();
-        self.menu.close();
-        if (session) {
-            // Viva → si va dove è, e nessuna tab nuova: una seconda `claude
-            // --resume` sullo stesso id aprirebbe un secondo scrittore sul
-            // medesimo transcript. La tab esatta non è raggiungibile — Ptyxis
-            // non espone targeting per-tab — quindi si consegna la finestra del
-            // progetto e la tab la scegli tu.
-            const win = findProjectWindow();
-            if (win) Desktop.focusWindow(win, ts);
-            else log(`[Compass] conversazione viva senza finestra del progetto: ${sessionId}`);
-            return;
-        }
-        Desktop.launchResume(
-            project,
-            {sessionId, taskId: mark.taskId, model: mark.model},
-            ts,
-            findProjectWindow
-        );
-    });
-    row.add_child(openBtn);
+        const findProjectWindow = projectWindowResolver(self, project);
+        openBtn.connect('clicked', () => {
+            // Il ts del click va catturato PRIMA di chiudere il menu: la
+            // chiusura rilascia il grab e rifocussa la finestra pre-menu, e
+            // senza il timestamp di un evento valido Mutter ignora l'activate
+            // che segue.
+            const ts = global.get_current_time();
+            self.menu.close();
+            Desktop.launchResume(
+                project,
+                {sessionId, taskId: mark.taskId, model: mark.model},
+                ts,
+                findProjectWindow
+            );
+        });
+        row.add_child(openBtn);
+    }
 
     // Il toggle chiede la `dir` del progetto (dove sta il sidecar): senza, la
     // riga resta di sola lettura invece di offrire un bottone che non può
