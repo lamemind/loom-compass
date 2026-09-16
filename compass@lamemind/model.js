@@ -425,9 +425,15 @@ export function sessionsForProject(project, liveSessions) {
 // ── Marche per-conversazione: il sidecar del deck (T158) ─────────────────────
 //
 // `<project-dir>/.claude/loom/session-tasks.jsonl` — lo stesso file JSONL
-// append-only con cui il deck lega una conversazione a una task. Compass ne legge
-// e ne scrive DUE campi booleani, `priority` e `pinned`; gli altri (`taskId`,
-// `forkOf`, `note`) appartengono a chi li scrive e non vengono toccati.
+// append-only con cui il deck lega una conversazione a una task. Compass ne
+// SCRIVE tre campi (`priority`, `pinned`, `note`) e ne LEGGE sei: ai tre si
+// aggiungono `taskId`, `title` e `model`, che scrive solo il deck.
+//
+// I due insiemi non coincidono, e la differenza è deliberata: leggere un campo
+// costa niente e serve a mostrarlo, scriverne uno che appartiene a un altro
+// produttore lo sovrascriverebbe col valore che aveva quando il popup si è
+// aperto (§writeSessionMarks). `forkOf` resta fuori da entrambi: nessuna
+// superficie di compass mostra il lineage di un fork.
 //
 // È la prima scrittura su disco di compass, e regge due scrittori senza lock
 // perché nessuno dei due rilegge-modifica-riscrive: si appende una riga, e vince
@@ -444,16 +450,38 @@ export function sessionMarksPath(projectDir) {
     return GLib.build_filenamev([dir, '.claude', 'loom', 'session-tasks.jsonl']);
 }
 
-// sessionId → {priority, pinned, note}. LAST-WINS PER CAMPO, come il lettore del
-// deck: vince l'ultimo record che NOMINA il campo, e un record che non lo nomina
-// non lo tocca. `false` è quindi una smarcatura esplicita, non un'assenza — ed è
-// il motivo per cui il campo va letto col `typeof` e non per verità.
+// sessionId → {priority, pinned, note, taskId, title, model}. LAST-WINS PER
+// CAMPO, come il lettore del deck: vince l'ultimo record che NOMINA il campo, e
+// un record che non lo nomina non lo tocca. `false` è quindi una smarcatura
+// esplicita, non un'assenza — ed è il motivo per cui il campo va letto col
+// `typeof` e non per verità.
 //
-// `note` segue la stessa regola con una cancellazione sua: la stringa VUOTA
-// toglie la chiave invece di lasciare una nota vuota. Chi legge non deve
-// distinguere «mai scritta» da «cancellata», perché a schermo sono la stessa
-// cosa — è la convenzione del deck, e cambiarla qui produrrebbe due letture
-// divergenti dello stesso file.
+// I quattro campi di testo (`note`, `taskId`, `title`, `model`) seguono la
+// stessa regola con una cancellazione loro: la stringa VUOTA toglie la chiave
+// invece di lasciare un valore vuoto. Chi legge non deve distinguere «mai
+// scritto» da «cancellato», perché a schermo sono la stessa cosa — è la
+// convenzione del deck, e cambiarla qui produrrebbe due letture divergenti
+// dello stesso file.
+//
+// T162 — `taskId`, `title` e `model` entrano qui perché il blocco delle
+// pinnate li mostra e li usa per riaprire la conversazione: il titolo è
+// l'etichetta della riga, `taskId` decide se la ripresa è scoped o spot, il
+// modello è quello con cui la conversazione gira. Prima il reader era una
+// whitelist di tre campi e li scartava DI PROPOSITO, con la motivazione che
+// «appartengono a chi li scrive»: vale per la scrittura, non per la lettura.
+// Il sintomo di un campo mancante non sarebbe stato un errore ma una funzione
+// degradata in silenzio — una ripresa spot dove doveva essere scoped.
+//
+// Nessuno dei tre è garantito: `title` e `model` sono EVENTUALMENTE CONSISTENTI
+// (li riempie il deck quando gira, vedi `session-meta.ts` lato deck), quindi la
+// UI deve avere un fallback per la finestra in cui mancano.
+
+// I campi di TESTO del record, tutti con la stessa regola di lettura: la
+// stringa vuota cancella, l'assenza non tocca niente. Un elenco e non quattro
+// rami identici — un campo nuovo del sidecar si aggiunge qui e la regola la
+// eredita, invece di essere ricopiata una quinta volta.
+const MARK_TEXT_FIELDS = ['note', 'taskId', 'title', 'model'];
+
 export function loadSessionMarks(projectDir) {
     const marks = new Map();
     const path  = sessionMarksPath(projectDir);
@@ -476,9 +504,10 @@ export function loadSessionMarks(projectDir) {
         const cur = marks.get(d.sessionId) ?? {};
         if (typeof d.priority === 'boolean') cur.priority = d.priority;
         if (typeof d.pinned   === 'boolean') cur.pinned   = d.pinned;
-        if (typeof d.note     === 'string')  {
-            if (d.note) cur.note = d.note;
-            else        delete cur.note;
+        for (const f of MARK_TEXT_FIELDS) {
+            if (typeof d[f] !== 'string') continue;
+            if (d[f]) cur[f] = d[f];
+            else      delete cur[f];
         }
         marks.set(d.sessionId, cur);
     }
