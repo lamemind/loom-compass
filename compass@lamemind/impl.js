@@ -172,6 +172,13 @@ class CompassIndicator extends PanelMenu.Button {
         this._loomWins           = null; // cache window-map (project-level) progetti loom
         this._scroll             = null; // St.ScrollView del popup — montata una volta (Menu.mountScroll)
         this._section            = null; // PopupMenuSection dentro la scroll: qui buildMenu costruisce
+        // Sotto-menu del giro corrente, `<projectId>:<pinned|launch>` → PopupSubMenu.
+        // Ricostruita da `buildMenu` insieme ai widget che indicizza.
+        this._subs               = new Map();
+        // L'UNICO sotto-menu aperto, come chiave — non come widget: `buildMenu`
+        // parte da `removeAll()` e gira a ogni annuncio di stato, quindi ciò che
+        // deve sopravvivere a una ricostruzione non può vivere in un attore.
+        this._openSub            = null;
         this._notificationSource = null;
 
         // ── Layout top-bar: [icona] [badge] [consumo account] ───────────────
@@ -222,7 +229,17 @@ class CompassIndicator extends PanelMenu.Button {
 
         // Apertura menu → segna tutto visto + ricostruisce
         this.menu.connect('open-state-changed', (menu, open) => {
-            if (!open) return;
+            if (!open) {
+                // Il popup che si chiude dimentica quale sotto-menu era aperto:
+                // la memoria di `_openSub` esiste per sopravvivere alle
+                // RICOSTRUZIONI del menu (che avvengono a popup aperto, a ogni
+                // annuncio di stato), non alla chiusura — riaprire il menu
+                // ricostruisce tutto da zero, e trovare un ramo già espanso da
+                // una sessione precedente sarebbe uno stato che l'utente non
+                // ricorda di aver lasciato.
+                this._openSub = null;
+                return;
+            }
             this._markAllSeen();
             this._updateBadge();
             this._loomRegistry = Model.loadLoomRegistry(); // niente watch dconf (no typelib) → refresh su apertura

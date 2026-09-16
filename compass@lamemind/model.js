@@ -450,7 +450,7 @@ export function sessionMarksPath(projectDir) {
     return GLib.build_filenamev([dir, '.claude', 'loom', 'session-tasks.jsonl']);
 }
 
-// sessionId → {priority, pinned, note, taskId, title, model}. LAST-WINS PER
+// sessionId → {priority, pinned, pinRank, note, taskId, title, model}. LAST-WINS PER
 // CAMPO, come il lettore del deck: vince l'ultimo record che NOMINA il campo, e
 // un record che non lo nomina non lo tocca. `false` è quindi una smarcatura
 // esplicita, non un'assenza — ed è il motivo per cui il campo va letto col
@@ -496,6 +496,7 @@ export function loadSessionMarks(projectDir) {
         return marks; // sidecar assente: nessuna marca, non un errore
     }
 
+    let order = 0; // posizione crescente dei record `pinned:true` → rango di pin
     for (const line of text.split('\n')) {
         if (!line.trim()) continue;
         let d;
@@ -503,7 +504,19 @@ export function loadSessionMarks(projectDir) {
         if (typeof d?.sessionId !== 'string') continue;
         const cur = marks.get(d.sessionId) ?? {};
         if (typeof d.priority === 'boolean') cur.priority = d.priority;
-        if (typeof d.pinned   === 'boolean') cur.pinned   = d.pinned;
+        // Il RANGO del pin, oltre al pin: è la posizione nel file dell'ULTIMO
+        // record `pinned:true`, quindi rango più alto = pinnata più di recente.
+        // Serve a ordinare il blocco delle pinnate, e va derivato qui perché
+        // l'ordine di inserimento della mappa è quello del PRIMO record che
+        // nomina quella conversazione — per una pinnata, spinnata e ri-pinnata
+        // i due ordini divergono, e a schermo vincerebbe il più vecchio.
+        // Stessa semantica del lettore del deck, che sullo stesso file espone
+        // il rango come valore della mappa `pinned`.
+        if (typeof d.pinned === 'boolean') {
+            cur.pinned = d.pinned;
+            if (d.pinned) cur.pinRank = order++;
+            else          delete cur.pinRank;
+        }
         for (const f of MARK_TEXT_FIELDS) {
             if (typeof d[f] !== 'string') continue;
             if (d[f]) cur[f] = d[f];
@@ -577,6 +590,41 @@ export function writeSessionMarks(projectDir, sessionId, fields) {
 // record divergerebbe dalla prima al primo campo aggiunto.
 export function writeSessionMark(projectDir, sessionId, field, value) {
     return writeSessionMarks(projectDir, sessionId, {[field]: value});
+}
+
+/**
+ * Le pinnate CORRENTI di un progetto, ordine di pin DESC (ultima in cima).
+ *
+ * Prende le marche già lette e il registro vivo, e ritorna una riga per
+ * conversazione pinnata con la sua `session` viva accanto — `null` quando la
+ * conversazione non è (più) un processo aperto. È la distinzione su cui si
+ * biforca il click: una viva si focussa, una morta si riprende.
+ *
+ * Ordine per RANGO e non per insieme: le righe devono stare ferme fra due
+ * aperture del menu, o si clicca su quella sbagliata. Il rango è stabile —
+ * viene dalla posizione nel file append-only — quindi l'ordine non si muove
+ * finché nessuno pinna o spinna.
+ *
+ * Una pinnata il cui transcript non esiste più (`⚠ pin stale` nel deck) resta
+ * in lista: compass non lo può sapere senza aprire `~/.claude/projects/`, cosa
+ * che non fa — la lettura di un transcript dentro il compositore bloccherebbe
+ * il desktop. La ripresa di una stale parte e fallisce dentro la tab, che è il
+ * posto giusto per vederlo.
+ */
+export function pinnedForProject(project, marks, liveSessions) {
+    const live = new Map(
+        sessionsForProject(project, liveSessions)
+            .filter(s => s.sessionId)
+            .map(s => [s.sessionId, s])
+    );
+    return [...marks.entries()]
+        .filter(([, m]) => m.pinned === true)
+        .sort((a, b) => (b[1].pinRank ?? 0) - (a[1].pinRank ?? 0))
+        .map(([sessionId, mark]) => ({
+            sessionId,
+            mark,
+            session: live.get(sessionId) ?? null,
+        }));
 }
 
 // ── Età di una sessione (T149) ────────────────────────────────────────────

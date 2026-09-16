@@ -16,6 +16,7 @@
 
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import Graphene from 'gi://Graphene';
 import Pango from 'gi://Pango';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
@@ -111,6 +112,139 @@ function truncateLabel(label) {
 // esattamente il regime da cui si parte.
 function hideOrnament(item) {
     item.setOrnament(PopupMenu.Ornament.HIDDEN);
+}
+
+// ── Sotto-menu costruiti a mano ──────────────────────────────────────────────
+//
+// Il cappello di un progetto porta DUE sotto-menu — le conversazioni pinnate e
+// le voci launch — e nessuno dei due può essere una `PopupSubMenuMenuItem`: ne
+// servirebbero due, cioè due righe in più per ogni progetto, quando la riga del
+// cappello esiste già e ha spazio per due chevron.
+//
+// Un `PopupSubMenu` si costruisce quindi a mano, e lo shell allora non fa più
+// tre cose che per una `PopupSubMenuMenuItem` fa da sé:
+//
+//  ① `addMenuItem` inserisce l'attore del sotto-menu nel box subito dopo la
+//     riga e chiama `_setParent`. A mano: `box.add_child(sub.actor)` nell'ordine
+//     giusto e `sub._setParent(self.menu)` — senza il parent, `_getTopMenu()`
+//     torna il sotto-menu stesso e il calcolo del tetto d'altezza legge il tema
+//     dell'attore sbagliato.
+//  ② `removeAll()` distrugge solo i figli il cui `_delegate` è una
+//     `PopupBaseMenuItem` o una `PopupMenuSection`. L'attore di un
+//     `PopupSubMenu` non è nessuna delle due, quindi sopravvivrebbe a ogni
+//     ricostruzione del menu accumulandosi nel box. Rimedio: il sotto-menu
+//     muore col suo item (`item.connect('destroy', …)`), che `removeAll()`
+//     distrugge — lo stesso cablaggio che `PopupSubMenuMenuItem` si fa nel
+//     costruttore.
+//  ③ `_setOpenedSubMenu` — la regola «uno aperto alla volta» — scatta dal
+//     `_subMenuOpenStateChanged` di una `PopupSubMenuMenuItem`, mai da un
+//     `PopupSubMenu` nudo. La tiene quindi compass, in `self._openSub`.
+//
+// La freccia passata al costruttore è OBBLIGATORIA e deve essere un attore
+// reale: `open`/`close` ne animano `rotation_angle_z` senza controllare che
+// esista. È anche l'unico indicatore di stato del chevron — nessuno scambio di
+// `icon_name`: `pan-end-symbolic` ruotata di 90° è già la freccia in giù, ed è
+// come lo shell disegna le proprie.
+
+/** Pivot della rotazione della freccia, come nei sotto-menu dello shell: senza,
+ *  la rotazione avviene attorno all'angolo in alto a sinistra e la freccia
+ *  scappa fuori dal bottone. */
+const ARROW_PIVOT = new Graphene.Point({x: 0.5, y: 0.6});
+
+/**
+ * Costruisce un chevron e il suo sotto-menu, e li aggancia alla riga.
+ *
+ * `label` non vuota → il bottone porta testo davanti alla freccia (`📌 5`);
+ * vuota → la sola freccia, come il chevron delle launch.
+ *
+ * Il chevron va aggiunto SOLO se il sotto-menu avrà delle righe: `open()`
+ * rifiuta un sotto-menu vuoto, e un bottone che non fa niente è peggio di un
+ * bottone assente. Il chiamante lo sa prima di costruire — decide lui.
+ */
+function attachSubMenu(self, item, row, key, label) {
+    const arrow = new St.Icon({
+        icon_name: 'pan-end-symbolic',
+        style_class: 'popup-menu-arrow',
+    });
+    arrow.pivot_point = ARROW_PIVOT;
+
+    const box = new St.BoxLayout({y_align: Clutter.ActorAlign.CENTER});
+    if (label) {
+        box.add_child(new St.Label({
+            text: label,
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+    }
+    box.add_child(arrow);
+
+    const chevron = new St.Button({
+        style_class: 'compass-chevron',
+        child: box,
+        can_focus: true, track_hover: true,
+        y_align: Clutter.ActorAlign.CENTER,
+    });
+
+    const sub = new PopupMenu.PopupSubMenu(item, arrow);
+    sub._setParent(self.menu); // ① senza questo `_getTopMenu()` torna `sub`
+    // NIENTE animazione slide, come già per le launch: `open`/`close` animano
+    // quando `animate` è truthy, e `toggle()` ne passa uno. L'override è
+    // sull'ISTANZA e dipende dal solo contratto stabile «animate falsy →
+    // nessun ease», non dai rami interni della classe.
+    const _open  = sub.open.bind(sub);
+    const _close = sub.close.bind(sub);
+    sub.open  = () => _open(false);
+    sub.close = () => _close(false);
+    // ② il sotto-menu muore col suo item, o `removeAll()` lo lascia nel box
+    item.connect('destroy', () => sub.destroy());
+
+    self._subs.set(key, sub);
+    chevron.connect('clicked', () => toggleSubMenu(self, key));
+    row.add_child(chevron);
+    return sub;
+}
+
+/**
+ * ③ «Uno aperto alla volta, e sopravvive alla ricostruzione».
+ *
+ * Lo stato sta in UNA chiave dell'indicatore (`self._openSub`,
+ * `<projectId>:<pinned|launch>`) e non nei widget, perché i widget non
+ * sopravvivono: `buildMenu` parte da `removeAll()` e gira a ogni annuncio di
+ * stato di qualunque conversazione, anche mentre il popup è aperto e sotto il
+ * puntatore. Un sotto-menu espanso sparirebbe al primo `Stop` di un'altra
+ * sessione.
+ *
+ * Aprire chiude quello aperto, di qualunque progetto e tipo. La chiave si
+ * scrive solo se il sotto-menu si è davvero aperto: `open()` rifiuta un
+ * sotto-menu vuoto, e registrare una chiave per un sotto-menu chiuso
+ * lascerebbe il popup convinto di avere qualcosa di aperto.
+ */
+function toggleSubMenu(self, key) {
+    const aperto = self._openSub;
+    if (aperto && aperto !== key) self._subs.get(aperto)?.close();
+    if (aperto === key) {
+        self._subs.get(key)?.close();
+        self._openSub = null;
+        return;
+    }
+    const sub = self._subs.get(key);
+    if (!sub) return;
+    sub.open();
+    self._openSub = sub.isOpen ? key : null;
+}
+
+// Riapre il sotto-menu che la chiave nomina, dopo che `buildMenu` ha ricostruito
+// i widget. Chiave che non trova più un sotto-menu (progetto sparito dal
+// registry, pinnate finite) → si dimentica, invece di restare appesa a indicare
+// qualcosa che non esiste.
+function restoreOpenSubMenu(self) {
+    if (!self._openSub) return;
+    const sub = self._subs.get(self._openSub);
+    if (!sub) {
+        self._openSub = null;
+        return;
+    }
+    sub.open();
+    if (!sub.isOpen) self._openSub = null;
 }
 
 // ── Etichetta di sessione ────────────────────────────────────────────────────
@@ -215,6 +349,9 @@ export function buildMenu(self) {
     // il contenitore scorrevole montato una volta sola da mountScroll, e da lì in
     // poi le voci tornerebbero a impilarsi fuori schermo.
     self._section.removeAll();
+    // I sotto-menu del giro precedente sono morti coi loro item: il registro
+    // riparte vuoto, o `toggleSubMenu` aprirebbe un attore distrutto.
+    self._subs = new Map();
     self.menu.box.style = `min-width: ${MENU_MIN_WIDTH_PX}px;`;
     self._scroll.style  = `max-height: ${scrollMaxHeight()}px;`;
     // cache usata anche da findNotificationWindow via self._winMap
@@ -234,13 +371,16 @@ export function buildMenu(self) {
         empty.setSensitive(false);
         self._section.addMenuItem(empty);
     }
+
+    // Ultimo passo, e per forza: riapre sui widget appena costruiti.
+    restoreOpenSubMenu(self);
 }
 
 // Voce progetto loom = UNA riga self-contained (merge vecchio+nuovo), non più
 // header di sotto-menu con figli esplosi. Layout:
 //
-//   [⚙️]  [🧵 loom-works ─────────]  [🎴]   [▸]
-//   dot   claude (emoji+title, →)    deck   chevron (solo se launch custom)
+//   [⚙️]  [🧵 loom-works ──]  [🤖] [🎴] [🖥️]  [📌 5 ▸]  [▸]
+//   dot   surface default      always-launch   pinnate   launch
 //
 //  - dot           = STATO del progetto, per rollup dei figli (loomRollupState).
 //                    La presenza non è più il suo colore ma la sua OPACITÀ, vedi
@@ -248,95 +388,163 @@ export function buildMenu(self) {
 //  - name btn      = emoji+nome → focus del progetto se aperto, altrimenti lancia
 //                    la surface default. L'UNICO focus-or-launch della riga.
 //  - deck btn      = emoji fissa 🎴 (solo se surface deck abilitata) → always-launch.
-//  - chevron+menu  = SOLO se ci sono launch custom; il sotto-menu contiene
+//  - chevron 📌 N  = SOLO se il progetto ha conversazioni pinnate; il sotto-menu
+//                    ne contiene una riga ciascuna.
+//  - chevron ▸     = SOLO se ci sono launch custom; il sotto-menu contiene
 //                    unicamente le voci launch (codium/idea/…).
 //
-// Le surface tracked si aprono SENZA passare dal sotto-menu (bottoni inline).
+// Entrambi i sotto-menu sono costruiti a mano (§Sotto-menu costruiti a mano) e
+// la riga è sempre una `PopupBaseMenuItem`: due `PopupSubMenuMenuItem` per
+// progetto vorrebbero dire due righe in più per ognuno, quando la riga del
+// cappello ha già spazio per due chevron.
+//
+// Le surface tracked si aprono SENZA passare dai sotto-menu (bottoni inline).
 // Il fade (opacity 110, ripristino su hover) è di PROGETTO, non per-surface: sta
 // su dot e bottone-nome, e solo quando il progetto non ha nessuna finestra aperta.
 export function addLoomProject(self, project) {
-    const wins      = self._loomWins.get(project.id) ?? {win: null};
-    const sessions  = Model.sessionsForProject(project, self._liveSessions);
-    const hasLaunch = project.launch.length > 0;
+    const wins     = self._loomWins.get(project.id) ?? {win: null};
+    const sessions = Model.sessionsForProject(project, self._liveSessions);
 
-    if (hasLaunch) {
-        // Con launch → PopupSubMenuMenuItem (ci dà il wiring lifecycle del
-        // sotto-menu gratis), ma header ripulito + toggle spostato sul chevron.
-        const item = new PopupMenu.PopupSubMenuMenuItem('');
-        // Ripulisci i figli di default della PopupSubMenuMenuItem che
-        // spostano/centrano il contenuto (verificato via probe struttura):
-        //  - label      (x_expand)
-        //  - _triangleBin (freccia)
-        //  - popup-menu-item-expander (St.Bin x_expand): DUE figli x_expand
-        //    (expander + la mia row) si spartiscono lo spazio → l'expander
-        //    occupa metà a sinistra e spinge la row a destra = CENTRATO.
-        if (item.label)        item.remove_child(item.label);
-        if (item._triangleBin) item.remove_child(item._triangleBin);
-        for (const c of item.get_children()) {
-            if ((c.style_class ?? '').includes('popup-menu-item-expander'))
-                item.remove_child(c);
-        }
-        hideOrnament(item);
-        item.activate = (_event) => {};                             // il click sulla riga NON toggla
+    // Le marche si leggono UNA volta per progetto, non una per riga: il sidecar è
+    // un file solo, e un lettore per riga lo riaprirebbe N volte a ogni giro di
+    // menu — e i giri sono tanti, perché ogni annuncio D-Bus ricostruisce. Le
+    // leggono due blocchi (i toggle delle righe-sessione e le pinnate), che è
+    // una ragione in più per leggerle qui e passarle giù.
+    const marks  = Model.loadSessionMarks(project.dir);
+    const pinned = Model.pinnedForProject(project, marks, self._liveSessions);
 
-        // NIENTE animazione slide sul sotto-menu: apri/chiudi istantaneo.
-        // GNOME anima in PopupSubMenu.open/close(animate) con un ease sull'height
-        // (250ms EASE_OUT_EXPO) quando `animate` è truthy; `toggle()` passa un
-        // valore truthy → parte l'animazione. Sovrascrivo open/close sull'ISTANZA
-        // forzando animate=false (ramo istantaneo). Robusto: non dipende dai rami
-        // interni (JS di gnome-shell non leggibile, compilata nel binario), solo
-        // dal contratto stabile "animate falsy → nessun ease". Scope = solo questo
-        // sotto-menu launch, non tocca gli altri menu.
-        const _open  = item.menu.open.bind(item.menu);
-        const _close = item.menu.close.bind(item.menu);
-        item.menu.open  = () => _open(false);
-        item.menu.close = () => _close(false);
+    const item = new PopupMenu.PopupBaseMenuItem({activate: false});
+    hideOrnament(item);
+    const row = fillLoomHeader(self, item, project, wins, sessions);
 
-        const row = fillLoomHeader(self, item, project, wins, sessions);
+    // I due chevron dentro `row` (non nell'item) per stare sulla stessa riga,
+    // all'estrema destra — lo spacer di `fillLoomHeader` li spinge lì. Ognuno
+    // compare solo se il suo sotto-menu avrà righe: `open()` rifiuta un
+    // sotto-menu vuoto, quindi un chevron senza contenuto sarebbe inerte.
+    const pinnedSub = pinned.length > 0
+        ? attachSubMenu(self, item, row, `${project.id}:pinned`, `${MARK_GLYPH.pinned} ${pinned.length}`)
+        : null;
+    const launchSub = project.launch.length > 0
+        ? attachSubMenu(self, item, row, `${project.id}:launch`, '')
+        : null;
 
-        // chevron = bottone dedicato al toggle del sotto-menu launch. Va dentro
-        // `row` (non nell'item) per stare sulla stessa riga, all'estrema destra
-        // (il bottone claude x_expand lo spinge lì).
-        const chevron = new St.Button({
-            style_class: 'compass-chevron',
-            child: new St.Icon({icon_name: 'pan-end-symbolic', style_class: 'popup-menu-arrow'}),
-            can_focus: true, track_hover: true,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        chevron.connect('clicked', () => item.menu.toggle());
-        item.menu.connect('open-state-changed', (_m, open) => {
-            chevron.child.icon_name = open ? 'pan-down-symbolic' : 'pan-end-symbolic';
-        });
-        row.add_child(chevron);
+    self._section.addMenuItem(item);
 
+    // Gli attori dei sotto-menu vanno nel box SUBITO DOPO la riga, nell'ordine
+    // dei chevron: è ciò che `addMenuItem` fa da sé per una
+    // `PopupSubMenuMenuItem` e che qui tocca a noi (① di §Sotto-menu).
+    if (pinnedSub) {
+        self._section.box.add_child(pinnedSub.actor);
+        for (const p of pinned)
+            pinnedSub.addMenuItem(pinnedRow(self, project, p));
+    }
+    if (launchSub) {
+        self._section.box.add_child(launchSub.actor);
         // voci launch (custom) → command @project-root, fire-once
         for (const launch of project.launch) {
             const label = launch.label || launch.command;
             const li    = new PopupMenu.PopupMenuItem(`${launch.emoji} ${label}`);
             li.connect('activate', () => { Desktop.runLaunch(project, launch); self.menu.close(); });
-            item.menu.addMenuItem(li);
+            launchSub.addMenuItem(li);
         }
-
-        self._section.addMenuItem(item);
-    } else {
-        // Senza launch → NIENTE sotto-menu: riga inerte (highlight su hover) coi
-        // soli bottoni inline. `activate:false` → il click sulla riga non attiva.
-        const item = new PopupMenu.PopupBaseMenuItem({activate: false});
-        hideOrnament(item);
-        fillLoomHeader(self, item, project, wins, sessions);
-        self._section.addMenuItem(item);
     }
 
     // Righe-sessione: una per sessione viva, subito sotto il cappello e nel
-    // menu principale (non nel sotto-menu launch, che resta dietro il chevron
-    // e chiede un click in più per una cosa che si guarda a colpo d'occhio).
-    //
-    // Le marche si leggono UNA volta per progetto, non una per riga: il sidecar è
-    // un file solo, e un lettore per riga lo riaprirebbe N volte a ogni giro di
-    // menu — e i giri sono tanti, perché ogni annuncio D-Bus ricostruisce.
-    const marks = Model.loadSessionMarks(project.dir);
+    // menu principale (non dietro un chevron, che chiederebbe un click in più
+    // per una cosa che si guarda a colpo d'occhio).
     for (const s of sessions)
         self._section.addMenuItem(sessionRow(self, s, project, marks));
+}
+
+// ── Righe delle conversazioni pinnate ────────────────────────────────────────
+
+/** Glifo di una pinnata che non è (più) un processo vivo. Non è nessuno degli
+ *  `STATE_EMOJI`: quelli dicono cosa sta facendo una conversazione viva, e qui
+ *  non ce n'è una. Il cerchio vuoto dice «c'è, ma non sta girando». */
+const PINNED_DEAD_GLYPH = '○';
+
+/** Quanti caratteri di `sessionId` bastano a distinguere una conversazione
+ *  quando non ha né nota né titolo. Sono UUID: otto cifre esadecimali sono già
+ *  più di quante ne servano dentro un progetto solo, e la riga non deve
+ *  diventare una colonna di id. */
+const SHORT_ID_LEN = 8;
+
+/**
+ * Etichetta di una riga pinnata, in cascata.
+ *
+ * Ordine: **task id** davanti quando c'è, poi la **nota**, poi il **titolo** se
+ * dice qualcosa in più della nota, e l'**id corto** solo quando nota e titolo
+ * sono entrambi vuoti — così nessuna riga è muta.
+ *
+ * La nota precede il titolo perché è la parte scelta da un umano per dire cosa
+ * è quella conversazione, mentre il titolo è derivato; è anche l'ordine che la
+ * riga del deck usa sulle stesse due stringhe. Il titolo si mostra solo se
+ * DIFFERISCE dalla nota: la nota di spawn finisce nel titolo della tab, quindi
+ * su una conversazione aperta dal deck le due coincidono spesso, e ripeterla
+ * occuperebbe la riga senza aggiungere niente.
+ */
+export function pinnedLabel(sessionId, mark) {
+    const parti = [];
+    if (mark.taskId) parti.push(mark.taskId);
+    const nota   = (mark.note  ?? '').trim();
+    const titolo = (mark.title ?? '').trim();
+    if (nota) parti.push(nota);
+    if (titolo && titolo !== nota) parti.push(titolo);
+    if (!nota && !titolo) parti.push(sessionId.slice(0, SHORT_ID_LEN));
+    return truncateLabel(parti.join(' · '));
+}
+
+/**
+ * Riga di una conversazione pinnata: `glifo etichetta` a sinistra, il toggle
+ * 📌 a destra.
+ *
+ * Due assi distinti sullo stesso significato, come sulla riga del cappello:
+ *  - il GLIFO dice se la conversazione sta girando (lo stato, se viva) o no
+ *    (`○`);
+ *  - l'OPACITÀ dice la presenza sulla scala già in uso nel menu — 255 viva,
+ *    110 con ripristino su hover per una morta, che è esattamente il «assente
+ *    ma raggiungibile, il click la apre» del bottone-nome.
+ *
+ * Il toggle è 📌 e non 🚨: spinnare è l'unica azione che ha senso su una riga
+ * che potrebbe essere morta, e senza il toggle qui l'unico modo di spinnare una
+ * conversazione chiusa sarebbe aprire il deck. Una marca di priorità su una
+ * morta non avrebbe effetto — l'hook che la consuma scatta solo su sessioni
+ * vive.
+ */
+export function pinnedRow(self, project, entry) {
+    const {sessionId, mark, session} = entry;
+    const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false});
+    hideOrnament(item);
+    const row = new St.BoxLayout({
+        style_class: 'compass-session-row',
+        x_expand: true, x_align: Clutter.ActorAlign.FILL,
+    });
+
+    const glyph = session
+        ? (Model.STATE_EMOJI[Model.sessionState(session, self._channels)] ?? '⚪')
+        : PINNED_DEAD_GLYPH;
+
+    const label = new St.Label({
+        text: `${glyph}  ${pinnedLabel(sessionId, mark)}`,
+        y_align: Clutter.ActorAlign.CENTER,
+        x_expand: true,
+    });
+    label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    if (!session) {
+        label.opacity = 110;
+        item.connect('notify::hover', () => { label.opacity = item.hover ? 255 : 110; });
+    }
+    row.add_child(label);
+
+    // Il toggle chiede la `dir` del progetto (dove sta il sidecar): senza, la
+    // riga resta di sola lettura invece di offrire un bottone che non può
+    // scrivere niente. Il `sessionId` c'è per costruzione — è la chiave della
+    // marca che ha messo questa riga in lista.
+    if (project.dir)
+        row.add_child(markToggle(project, sessionId, 'pinned', true));
+
+    item.add_child(row);
+    return item;
 }
 
 // Riga-sessione, a due ancoraggi: `glifo titolo` a sinistra, `età toggle` a
