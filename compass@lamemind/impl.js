@@ -4,15 +4,17 @@
 // GNOME Shell 45+ (ES modules). Chiave sessione v1 = PTYXIS_PROFILE.
 //
 // È la RADICE del grafo dei moduli: ciclo di vita e stato dell'istanza, canale
-// D-Bus in ingresso, badge/suono/notifica in uscita. I quattro fratelli non lo
+// D-Bus in ingresso, badge/suono/notifica in uscita. I cinque fratelli non lo
 // importano mai — la dipendenza va in un verso solo:
 //
 //     impl.js  →  {menu.js, dialog.js}  →  {model.js, desktop.js}
+//     impl.js  →  usage.js
 //
 //   model.js    il dato: registri, registro dei processi vivi, stato, rollup
 //   desktop.js  le finestre e i processi: match, focus, coalescing, spawn, suono
 //   menu.js     i widget del popup: voce di menu, righe-sessione, bottoni surface
 //   dialog.js   il modale sulla conversazione in focus, e la sua risoluzione
+//   usage.js    il consumo dell'account in top bar: livelli, widget, mock
 //
 // Qui resta ciò che non può uscire: dove lo stato dell'istanza vive e dove i
 // moduli vengono cablati fra loro.
@@ -35,7 +37,7 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 // loader di GJS include nella chiave di cache → il file viene riletto da disco a
 // ogni enable(). La query NON si eredita: un `import './menu.js'` statico da
 // `impl.js?v=2` risolve a `menu.js` nudo, che resta in cache per tutta la vita
-// del processo gnome-shell. Con cinque file, `compass reload` ne ricaricherebbe
+// del processo gnome-shell. Con sei file, `compass reload` ne ricaricherebbe
 // uno — e il regime che ne esce è peggiore di «l'edit non prende»: impl nuovo che
 // parla con menu vecchio, un comportamento che non corrisponde a nessuna delle
 // due versioni, senza nessun errore a segnalarlo.
@@ -55,6 +57,7 @@ const Model   = await import('./model.js'   + _Q);
 const Desktop = await import('./desktop.js' + _Q);
 const Menu    = await import('./menu.js'    + _Q);
 const Dialog  = await import('./dialog.js'  + _Q);
+const Usage   = await import('./usage.js'   + _Q);
 
 // ── Scorciatoia globale ──────────────────────────────────────────────────────
 
@@ -171,7 +174,12 @@ class CompassIndicator extends PanelMenu.Button {
         this._section            = null; // PopupMenuSection dentro la scroll: qui buildMenu costruisce
         this._notificationSource = null;
 
-        // ── Layout top-bar: [icona] [badge] ─────────────────────────────────
+        // ── Layout top-bar: [icona] [badge] [consumo account] ───────────────
+        //
+        // Il consumo sta in coda e non fra icona e badge: il badge è contestuale
+        // (compare solo su ask/done) e va tenuto incollato all'icona, o a ogni
+        // comparsa sposterebbe di lato le due percentuali, che invece sono
+        // sempre presenti e devono stare ferme.
         const box = new St.BoxLayout({style_class: 'panel-status-menu-box'});
 
         this._icon = new St.Label({
@@ -188,8 +196,14 @@ class CompassIndicator extends PanelMenu.Button {
             style_class: 'ws-badge',
         });
 
+        // Consumo dell'account (5h e settimanale). MOCK: i numeri li produce un
+        // timer interno a usage.js, nessuna fonte è ancora collegata.
+        this._usage = Usage.buildUsage();
+        this._usageTimer = Usage.startMock(this._usage);
+
         box.add_child(this._icon);
         box.add_child(this._badge);
+        box.add_child(this._usage.actor);
         this.add_child(box);
 
         // ── Bootstrap ────────────────────────────────────────────────────────
@@ -463,6 +477,13 @@ class CompassIndicator extends PanelMenu.Button {
     // ── Cleanup ──────────────────────────────────────────────────────────────
 
     destroy() {
+        // Prima di distruggere gli attori: un timeout GLib sopravvive all'attore
+        // e al `compass reload`, e al giro dopo scriverebbe su label già morte —
+        // più un timer in più a ogni ricarica, che nessuno ferma fino al relogin.
+        if (this._usageTimer) {
+            GLib.Source.remove(this._usageTimer);
+            this._usageTimer = null;
+        }
         if (this._notificationSource) {
             this._notificationSource.destroy();
             this._notificationSource = null;
