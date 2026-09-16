@@ -28,10 +28,12 @@ const _Q = import.meta.url.includes('?') ? '?' + import.meta.url.split('?')[1] :
 const Model   = await import('./model.js'   + _Q);
 const Desktop = await import('./desktop.js' + _Q);
 
-// Cap di righe-sessione per progetto: oltre, una riga di riepilogo `+N`. Serve
-// perché il menu è una popup a lunghezza non limitata — dieci sessioni su un
-// progetto spingerebbero fuori schermo i progetti sotto.
-const SESSION_ROWS_MAX = 6;
+// Nessun cap sulle righe-sessione: ogni conversazione viva ha la sua riga.
+// Il cap a sei (con una riga di riepilogo `+N` in coda) esisteva perché il popup
+// non aveva un fondo — dieci conversazioni su un progetto spingevano fuori
+// schermo i progetti sotto. Ora il popup si ferma all'altezza dello schermo e il
+// contenuto scorre (§mountScroll), quindi il troppo non esce più dal bordo:
+// nascondere righe raggiungibili costerebbe solo informazione.
 
 // Stati per cui la riga porta l'età oltre al glifo (D1, T149): condividono lo
 // stesso campo (`statusUpdatedAt` via `Model.sessionAges`) — includere
@@ -51,8 +53,7 @@ const MARK_GLYPH = {priority: '🚨', pinned: '📌'};
 // blocchi si spostano insieme. Sta come stile inline e non in `stylesheet.css`
 // perché lo stylesheet resta in cache nel loader fino al prossimo relogin: una
 // regola nuova lì non si vedrebbe finché non si riavvia la sessione grafica.
-const ROW_INDENT_PX      = 8;
-const OVERFLOW_INDENT_PX = 20;
+const ROW_INDENT_PX = 8;
 
 // Larghezza minima del popup, in pixel.
 //
@@ -334,17 +335,8 @@ export function addLoomProject(self, project) {
     // un file solo, e un lettore per riga lo riaprirebbe N volte a ogni giro di
     // menu — e i giri sono tanti, perché ogni annuncio D-Bus ricostruisce.
     const marks = Model.loadSessionMarks(project.dir);
-    for (const s of cappedSessions(sessions))
+    for (const s of sessions)
         self._section.addMenuItem(sessionRow(self, s, project, marks));
-}
-
-// Applica il cap e, se taglia, sostituisce la coda con una sentinella che
-// dichiara quante ne restano fuori: una lista troncata in silenzio mente.
-export function cappedSessions(sessions) {
-    if (sessions.length <= SESSION_ROWS_MAX) return sessions;
-    const head = sessions.slice(0, SESSION_ROWS_MAX);
-    head.push({overflow: sessions.length - SESSION_ROWS_MAX});
-    return head;
 }
 
 // Riga-sessione, a due ancoraggi: `glifo titolo` a sinistra, `età toggle` a
@@ -369,19 +361,6 @@ export function sessionRow(self, session, project, marks) {
         style_class: 'compass-session-row',
         x_expand: true, x_align: Clutter.ActorAlign.FILL,
     });
-
-    // La sentinella dell'overflow non è una conversazione: non ha `sessionId`,
-    // quindi niente età e niente toggle — non c'è nulla da marcare. Resta la sola
-    // etichetta, più indentata delle righe vere come prima.
-    if (session.overflow) {
-        row.style = `padding-left: ${OVERFLOW_INDENT_PX}px;`;
-        row.add_child(new St.Label({
-            text: `+${session.overflow} altre`,
-            y_align: Clutter.ActorAlign.CENTER,
-        }));
-        item.add_child(row);
-        return item;
-    }
 
     row.style = `padding-left: ${ROW_INDENT_PX}px;`;
 
