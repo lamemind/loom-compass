@@ -247,6 +247,20 @@ function restoreOpenSubMenu(self) {
     if (!sub.isOpen) self._openSub = null;
 }
 
+/**
+ * La lambda che risolve la finestra del progetto AL CLICK, non adesso.
+ *
+ * Chi apre una tab o focussa una finestra deve vedere lo stato reale
+ * nell'istante dell'azione, non l'istantanea della costruzione del menu: fra le
+ * due possono passare minuti, e il menu si ricostruisce da sé a ogni annuncio
+ * di stato. Sta in una funzione perché la chiedono DUE posti — il cappello e
+ * ogni riga pinnata — e una seconda copia della formula divergerebbe al primo
+ * aggiustamento del matcher.
+ */
+function projectWindowResolver(self, project) {
+    return () => Desktop.resolveLoomWindows(self._loomRegistry).get(project.id)?.win ?? null;
+}
+
 // ── Etichetta di sessione ────────────────────────────────────────────────────
 
 // Identificativo mostrato nella riga-sessione.
@@ -530,11 +544,66 @@ export function pinnedRow(self, project, entry) {
         x_expand: true,
     });
     label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+
+    // L'etichetta dentro un BOTTONE, non nuda: è l'azione della riga (focus se
+    // viva, ripresa se morta), e un `St.Button` reattivo figlio di una riga
+    // `reactive: false` riceve il click — la non-reattività del padre toglie dal
+    // pick il solo padre, non il sottoalbero (misurato per i toggle di T158).
+    //
+    // La label va in una `St.BoxLayout` dentro il bottone, non come figlia
+    // diretta: `St.Button` è un `St.Bin` e CENTRA il proprio figlio quando ha
+    // spazio extra, ignorando l'allineamento chiesto — il titolo finirebbe in
+    // mezzo alla riga. Una box invece rispetta l'espansione, quindi la label
+    // riempie da sinistra e si ellipsizza sulla larghezza vera.
+    const box = new St.BoxLayout({x_expand: true, x_align: Clutter.ActorAlign.FILL});
+    box.add_child(label);
+    const openBtn = new St.Button({
+        style_class: 'compass-surface-btn',
+        // Il padding della classe è tarato sui bottoni del cappello: su una riga
+        // di conversazione sfonderebbe l'altezza. Lo stile inline batte quello
+        // della classe sulla sola proprietà che nomina, quindi l'evidenziazione
+        // su hover resta.
+        style: 'padding: 1px 4px;',
+        child: box,
+        x_expand: true,
+        can_focus: true, track_hover: true,
+        y_align: Clutter.ActorAlign.CENTER,
+    });
+    // Fade di PRESENZA, la stessa scala del resto del menu: 255 = la
+    // conversazione sta girando, 110 con ripristino su hover = non c'è ma il
+    // click la riapre. È esattamente la semantica che il bottone-nome del
+    // cappello dà a quei due valori.
     if (!session) {
-        label.opacity = 110;
-        item.connect('notify::hover', () => { label.opacity = item.hover ? 255 : 110; });
+        openBtn.opacity = 110;
+        openBtn.connect('notify::hover', () => { openBtn.opacity = openBtn.hover ? 255 : 110; });
     }
-    row.add_child(label);
+
+    const findProjectWindow = projectWindowResolver(self, project);
+    openBtn.connect('clicked', () => {
+        // Il ts del click va catturato PRIMA di chiudere il menu: la chiusura
+        // rilascia il grab e rifocussa la finestra pre-menu, e senza il
+        // timestamp di un evento valido Mutter ignora l'activate che segue.
+        const ts = global.get_current_time();
+        self.menu.close();
+        if (session) {
+            // Viva → si va dove è, e nessuna tab nuova: una seconda `claude
+            // --resume` sullo stesso id aprirebbe un secondo scrittore sul
+            // medesimo transcript. La tab esatta non è raggiungibile — Ptyxis
+            // non espone targeting per-tab — quindi si consegna la finestra del
+            // progetto e la tab la scegli tu.
+            const win = findProjectWindow();
+            if (win) Desktop.focusWindow(win, ts);
+            else log(`[Compass] conversazione viva senza finestra del progetto: ${sessionId}`);
+            return;
+        }
+        Desktop.launchResume(
+            project,
+            {sessionId, taskId: mark.taskId, model: mark.model},
+            ts,
+            findProjectWindow
+        );
+    });
+    row.add_child(openBtn);
 
     // Il toggle chiede la `dir` del progetto (dove sta il sidecar): senza, la
     // riga resta di sola lettura invece di offrire un bottone che non può
@@ -670,11 +739,7 @@ export function fillLoomHeader(self, item, project, wins, sessions = []) {
         y_expand: true, y_align: Clutter.ActorAlign.FILL,
     });
 
-    // Risoluzione della finestra di progetto AL CLICK, non ora: passata come
-    // lambda a launchTracked, che deve vedere lo stato reale nell'istante
-    // dell'azione e non l'istantanea della costruzione del menu.
-    const findProjectWindow = () =>
-        Desktop.resolveLoomWindows(self._loomRegistry).get(project.id)?.win ?? null;
+    const findProjectWindow = projectWindowResolver(self, project);
 
     // dot — STATO via rollup delle surface tracked (ask>done>running>idle),
     // come le voci vecchie: STATE_EMOJI keyed su _sessions[bindingUUID]. Lo

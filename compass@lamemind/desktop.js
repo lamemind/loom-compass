@@ -206,31 +206,16 @@ export function resolveDefaultSurface(project) {
 // per-finestra su /org/gnome/Ptyxis/window/N espongono solo tab.read-only /
 // interface-style (niente new-tab). Unica via = focus-then-tab.
 //
-// ORDINE DELLE OPERAZIONI (il punto delicato, causa del bug "tab nella finestra
-// sbagliata"):
-//  - `focusWindow(projWin)` va chiamato SINCRONO dal click handler: attivare
-//    una finestra richiede il timestamp di un evento input valido, altrimenti
-//    la focus-stealing-prevention di Mutter IGNORA l'activate. (Chiamarlo da un
-//    GLib.timeout — nessun evento input → activate silenziosamente bloccato.)
-//  - lo SPAWN della tab NON deve partire a delay fisso: il menu che si chiude
-//    rifocussa la finestra pre-menu (un altro progetto) e win.activate() è async
-//    → per un attimo la finestra attiva è ancora quella vecchia. Se spawni lì,
-//    la tab ci finisce dentro. Perciò lo spawn aspetta tempo reale (waitMs).
-//
-// `findProjectWindow` è una LAMBDA a zero argomenti, non il registro: la
-// finestra va riletta nell'istante del click per catturare lo stato reale
-// dell'azione. Ricevere `loomRegistry` trasformerebbe il valore da letto-al-click
-// a catturato-alla-costruzione-del-menu — invisibile oggi (registro e menu si
-// riscrivono insieme), un bug il giorno in cui uno dei due si aggiorna da solo.
+// Qui c'è solo la composizione dell'argv per `kind`; l'orchestrazione
+// focus-then-tab, che è la parte delicata, sta in `coalesceTab` — condivisa con
+// la ripresa di una conversazione, che ha lo stesso identico bisogno.
 export function launchTracked(project, kind, ts, findProjectWindow) {
     try {
         const uuid = project.bindings?.[kind];
         // deck (comando globale) e terminal (nessun comando: È la shell) si
         // lanciano senza profilo. claude: serve il binding.
         if (kind !== 'deck' && kind !== 'terminal' && !uuid) return;
-        const home = GLib.get_home_dir();
-        let dir = project.dir || home;
-        if (dir.startsWith('~')) dir = home + dir.slice(1);
+        const dir = projectDir(project);
 
         const spawnTab = (newWindow) => {
             let argv;
@@ -278,47 +263,200 @@ export function launchTracked(project, kind, ts, findProjectWindow) {
             }
         };
 
-        // Finestra del progetto già aperta (una qualsiasi surface: match sul core
-        // emoji-set + `name` → intercetta la finestra qualunque tab sia attiva).
-        // Re-risolvo fresh al click per catturare lo stato reale nell'istante dell'azione.
-        const projWin = findProjectWindow();
-        if (!projWin) { spawnTab(true); return; } // nessuna finestra → creane la prima
-
-        // CAUSA VERA (diagnosi utente + trace): projWin può stare su un ALTRO
-        // desktop. L'activate innesca lo switch di workspace, che ha un'ANIMAZIONE.
-        // Mutter aggiorna get_focus_window()→projWin SUBITO (modello interno), ma
-        // il focus REALE arriva al client GTK/Ptyxis solo a FINE animazione. Se
-        // spawni `--tab` prima, Ptyxis ha ancora la sua active-window vecchia
-        // (altro progetto) → tab nella finestra sbagliata. `get_focus_window()` è
-        // quindi un BUGIARDO durante l'animazione: NON è un segnale di "pronto".
-        //
-        // Fix: (1) attiva projWin dopo la chiusura menu, col ts del click (evento
-        // valido → non bloccato da focus-stealing); (2) ASPETTA tempo REALE che
-        // l'animazione + consegna focus finiscano; (3) POI spawna. Attesa tarata
-        // sul costo reale: cambio desktop = animazione lunga; stesso desktop = breve.
-        const clickTs  = ts ?? global.get_current_time();
-        const activeWs = global.workspace_manager.get_active_workspace();
-        const targetWs = projWin.get_workspace();
-        const crossWs  = !!(targetWs && activeWs && targetWs !== activeWs);
-        // Cambio desktop → animazione di switch workspace: aspetto tempo REALE che
-        // finisca (e che il focus vero venga consegnato a Ptyxis) PRIMA di spawnare,
-        // altrimenti `--tab` va nella finestra vecchia. Stesso desktop → niente
-        // animazione, basta poco. 1.5s verificato sufficiente cross-desktop (3s era
-        // solo margine di sicurezza in fase di diagnosi).
-        const waitMs = crossWs ? 1500 : 400;
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 70, () => {
-            focusWindow(projWin, clickTs); // attiva → (eventuale) switch desktop + animazione
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, waitMs, () => {
-                // projWin ancora viva? Se è stata chiusa durante l'attesa, uno spawn
-                // `--tab` finirebbe in una finestra a caso → apri finestra nuova.
-                const alive = global.display.list_all_windows().includes(projWin);
-                spawnTab(!alive); // alive → tab (Ptyxis ora ha projWin attiva); morta → nuova
-                return GLib.SOURCE_REMOVE;
-            });
-            return GLib.SOURCE_REMOVE;
-        });
+        coalesceTab(project, ts, findProjectWindow, spawnTab);
     } catch (e) {
         logError(e, '[Compass] launchTracked');
+    }
+}
+
+// Project root in forma assoluta: il registry può portarla in forma tilde,
+// mentre chi spawna un processo ha bisogno di un path vero.
+function projectDir(project) {
+    const home = GLib.get_home_dir();
+    const dir = project.dir || home;
+    return dir.startsWith('~') ? home + dir.slice(1) : dir;
+}
+
+/**
+ * Il COALESCING: porta la tab dentro la finestra del progetto, qualunque cosa
+ * la tab contenga.
+ *
+ * `spawnTab(newWindow)` è il solo pezzo che cambia fra un chiamante e l'altro —
+ * una surface tracked, una conversazione ripresa — mentre l'orchestrazione è
+ * identica e delicata, quindi sta scritta una volta. Un secondo chiamante che
+ * la ricopiasse la ricopierebbe senza le attese, che sono la parte che non si
+ * deduce.
+ *
+ * ORDINE DELLE OPERAZIONI (il punto delicato, causa del bug "tab nella finestra
+ * sbagliata"):
+ *  - `focusWindow(projWin)` va chiamato col timestamp di un evento input
+ *    valido, altrimenti la focus-stealing-prevention di Mutter IGNORA
+ *    l'activate. (Chiamarlo da un GLib.timeout senza `ts` — nessun evento
+ *    input → activate silenziosamente bloccato.)
+ *  - lo SPAWN della tab NON deve partire a delay fisso: il menu che si chiude
+ *    rifocussa la finestra pre-menu (un altro progetto) e win.activate() è async
+ *    → per un attimo la finestra attiva è ancora quella vecchia. Se spawni lì,
+ *    la tab ci finisce dentro. Perciò lo spawn aspetta tempo reale (waitMs).
+ *
+ * `findProjectWindow` è una LAMBDA a zero argomenti, non il registro: la
+ * finestra va riletta nell'istante del click per catturare lo stato reale
+ * dell'azione. Ricevere `loomRegistry` trasformerebbe il valore da letto-al-click
+ * a catturato-alla-costruzione-del-menu — invisibile oggi (registro e menu si
+ * riscrivono insieme), un bug il giorno in cui uno dei due si aggiorna da solo.
+ */
+export function coalesceTab(project, ts, findProjectWindow, spawnTab) {
+    // Finestra del progetto già aperta (una qualsiasi surface: match sul core
+    // emoji-set + `name` → intercetta la finestra qualunque tab sia attiva).
+    // Re-risolvo fresh al click per catturare lo stato reale nell'istante dell'azione.
+    const projWin = findProjectWindow();
+    if (!projWin) { spawnTab(true); return; } // nessuna finestra → creane la prima
+
+    // CAUSA VERA (diagnosi utente + trace): projWin può stare su un ALTRO
+    // desktop. L'activate innesca lo switch di workspace, che ha un'ANIMAZIONE.
+    // Mutter aggiorna get_focus_window()→projWin SUBITO (modello interno), ma
+    // il focus REALE arriva al client GTK/Ptyxis solo a FINE animazione. Se
+    // spawni `--tab` prima, Ptyxis ha ancora la sua active-window vecchia
+    // (altro progetto) → tab nella finestra sbagliata. `get_focus_window()` è
+    // quindi un BUGIARDO durante l'animazione: NON è un segnale di "pronto".
+    const clickTs  = ts ?? global.get_current_time();
+    const activeWs = global.workspace_manager.get_active_workspace();
+    const targetWs = projWin.get_workspace();
+    const crossWs  = !!(targetWs && activeWs && targetWs !== activeWs);
+    // Cambio desktop → animazione di switch workspace: aspetto tempo REALE che
+    // finisca (e che il focus vero venga consegnato a Ptyxis) PRIMA di spawnare,
+    // altrimenti `--tab` va nella finestra vecchia. Stesso desktop → niente
+    // animazione, basta poco. 1.5s verificato sufficiente cross-desktop (3s era
+    // solo margine di sicurezza in fase di diagnosi).
+    const waitMs = crossWs ? 1500 : 400;
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 70, () => {
+        focusWindow(projWin, clickTs); // attiva → (eventuale) switch desktop + animazione
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, waitMs, () => {
+            // projWin ancora viva? Se è stata chiusa durante l'attesa, uno spawn
+            // `--tab` finirebbe in una finestra a caso → apri finestra nuova.
+            const alive = global.display.list_all_windows().includes(projWin);
+            spawnTab(!alive); // alive → tab (Ptyxis ora ha projWin attiva); morta → nuova
+            return GLib.SOURCE_REMOVE;
+        });
+        return GLib.SOURCE_REMOVE;
+    });
+}
+
+// ── Ripresa di una conversazione (T162) ──────────────────────────────────────
+
+// Il primitive di ripresa NON è in PATH: vive dentro il pacchetto npm del deck
+// (`~/.local/lib/node_modules/@lamemind/loom-deck/scripts/deck-run`), e il
+// symlink in `~/.local/bin` esiste solo per l'eseguibile del deck. Il contratto
+// di famiglia copre i FORMATI, non gli eseguibili: risolvere il path è a carico
+// di chi non è il deck.
+//
+// La risoluzione non assume niente oltre a ciò che il bottone 🎴 assume già —
+// `loom-deck` in PATH, e il PATH di gnome-shell contiene `~/.local/bin`. Da lì
+// il symlink punta a `dist/cli.js` dentro il pacchetto, e `deck-run` sta a
+// `../scripts/deck-run`: la stessa formula di `DECK_RUN` in `spawn.ts` lato deck.
+//
+// Scartate: `npm root -g` (un processo sincrono dentro il compositore), il path
+// cablato (si rompe al primo cambio di prefisso npm) e una seconda voce `bin`
+// nel pacchetto (metterebbe in PATH uno script che nessuno invoca a mano).
+let _deckRun = null; // memo del SOLO esito positivo: un fallimento si ritenta
+
+export function deckRunPath() {
+    if (_deckRun) return _deckRun;
+    try {
+        const bin = GLib.find_program_in_path('loom-deck');
+        if (!bin) return null;
+        // NOFOLLOW_SYMLINKS, o `query_info` descriverebbe il bersaglio e il
+        // target sarebbe vuoto.
+        const info = Gio.File.new_for_path(bin).query_info(
+            'standard::symlink-target',
+            Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
+            null
+        );
+        const target = info.get_symlink_target();
+        if (!target) return null; // non è un symlink (wrapper a mano?) → non indovino
+        // npm scrive un target RELATIVO (`../lib/node_modules/…`): va risolto
+        // contro la cartella del link, non contro il cwd del compositore.
+        const cli  = GLib.canonicalize_filename(target, GLib.path_get_dirname(bin));
+        const path = GLib.canonicalize_filename(
+            GLib.build_filenamev([GLib.path_get_dirname(cli), '..', 'scripts', 'deck-run']),
+            null
+        );
+        if (!GLib.file_test(path, GLib.FileTest.IS_EXECUTABLE)) return null;
+        _deckRun = path;
+        return _deckRun;
+    } catch (e) {
+        logError(e, '[Compass] deckRunPath');
+        return null;
+    }
+}
+
+// Alfabeti ammessi per i tre valori che compass passa a `deck-run`.
+//
+// Non è paranoia sull'argv — quello viaggia come array, senza shell. È che
+// `deck-run` mette il TaskID dentro `bash -lc "$IN_TAB_CMD"`, cioè in una riga
+// che una shell PARSA, e non lo quota: è nato per essere chiamato dal deck, che
+// l'id lo prende da `tasks.md`. Qui i valori arrivano dal sidecar, che è
+// macchina-locale ed editabile a mano. Un apice in `taskId` chiuderebbe la
+// stringa e consegnerebbe alla shell tutto ciò che segue.
+//
+// Un valore fuori alfabeto non blocca la ripresa: si degrada al ramo senza quel
+// valore (spot invece di scoped, cascata di deck-run invece del modello), che è
+// una funzione in meno e non una tab con un comando rotto.
+const SAFE_SID   = /^[A-Za-z0-9-]{8,64}$/;
+const SAFE_TASK  = /^T\d{1,6}$/;
+const SAFE_MODEL = /^(fable|opus|sonnet|haiku)$/;
+
+/**
+ * Riapre una conversazione chiusa come tab della finestra del progetto.
+ *
+ * `spec` = `{sessionId, taskId, model}` come li porta il sidecar. `taskId`
+ * presente → ripresa SCOPED (la tab nasce con `LOOM_TASK` e col task nel
+ * titolo); assente → ripresa spot (`--no-task`). Il modello viene passato
+ * esplicito: senza `--model`, `deck-run` consulta il catalogo col kind implicito
+ * `recap` — che oggi dà `fable` per coincidenza della riga di catalogo, non per
+ * un default di ripresa.
+ *
+ * Non controlla se il transcript esiste ancora: uno `stat` porterebbe
+ * `~/.claude/projects/` dentro i sorgenti dell'estensione, e leggere là dentro
+ * è precisamente ciò che compass non fa. Una pinnata stale si riprende e
+ * fallisce nella tab, che è il posto dove si vede.
+ */
+export function launchResume(project, spec, ts, findProjectWindow) {
+    try {
+        const deckRun = deckRunPath();
+        if (!deckRun) {
+            log('[Compass] ripresa impossibile: deck-run non risolvibile da `loom-deck` in PATH');
+            return;
+        }
+        const sid = SAFE_SID.test(spec?.sessionId ?? '') ? spec.sessionId : null;
+        if (!sid) {
+            log(`[Compass] ripresa impossibile: sessionId fuori alfabeto (${spec?.sessionId})`);
+            return;
+        }
+        const taskId = SAFE_TASK.test(spec.taskId ?? '')  ? spec.taskId : null;
+        const model  = SAFE_MODEL.test(spec.model ?? '')  ? spec.model  : null;
+        const dir    = projectDir(project);
+
+        const spawnTab = (newWindow) => {
+            const argv = [deckRun, taskId ?? '--no-task', '--resume', sid];
+            if (model) argv.push('--model', model);
+            if (newWindow) argv.push('--new-window');
+            try {
+                const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
+                launcher.set_cwd(dir);
+                // Esplicita e non lasciata a `$PWD`: `deck-run` la usa sia per
+                // `ptyxis -d` sia per risalire alla project root da cui legge
+                // identità e permissionMode, e dipendere dal `PWD` che bash
+                // deriva dal cwd è un anello in più senza guadagno.
+                launcher.setenv('LOOM_DECK_WORKDIR', dir, true);
+                launcher.spawnv(argv);
+            } catch (e) {
+                logError(e, '[Compass] launchResume spawn');
+            }
+        };
+
+        coalesceTab(project, ts, findProjectWindow, spawnTab);
+    } catch (e) {
+        logError(e, '[Compass] launchResume');
     }
 }
 
