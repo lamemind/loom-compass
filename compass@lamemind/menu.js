@@ -17,6 +17,7 @@
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import Pango from 'gi://Pango';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 // Token di cache-busting propagato ai fratelli: `import.meta.url` lo porta, un
@@ -66,6 +67,16 @@ const OVERFLOW_INDENT_PX = 20;
 // dell'indentazione sopra: una regola in `stylesheet.css` non si vedrebbe fino
 // al prossimo relogin.
 const MENU_MIN_WIDTH_PX = 480;
+
+// Spazio lasciato libero sotto il tetto d'altezza del popup, in pixel logici.
+//
+// Il tetto vero lo scrive GNOME da sé: `PanelMenu.Button._onOpenStateChanged`
+// mette sul menu `max-height: <altezza area di lavoro>px` a ogni apertura. Quel
+// vincolo però non basta da solo (§mountScroll), e l'area di lavoro non è lo
+// spazio che il CONTENUTO può occupare: il popup ci aggiunge padding, bordo e la
+// freccia del BoxPointer. Il margine tiene la zona scorrevole sotto il tetto del
+// popup, così a cedere è sempre lei e mai il popup intero.
+const MENU_VMARGIN_PX = 48;
 
 // Cap della label di riga: RETE, non il criterio di taglio.
 //
@@ -125,6 +136,71 @@ export function sessionLabel(session, project) {
     return truncateLabel(label);
 }
 
+// ── La zona scorrevole ───────────────────────────────────────────────────────
+
+// Monta la zona scorrevole che ospita TUTTE le voci, e va chiamata UNA volta
+// sola prima del primo `buildMenu`: sopravvive alle ricostruzioni del menu, che
+// sono tante — ogni annuncio D-Bus ne fa una, e ricostruire anche il contenitore
+// significherebbe perdere la posizione di scorrimento a ogni cambio di stato.
+//
+// Serve perché il menu cresce col numero di progetti e di conversazioni vive, e
+// oltre l'altezza dello schermo le voci in fondo restano irraggiungibili: il
+// popup non si ferma al bordo, ci esce.
+//
+// Metà del meccanismo ce l'ha già GNOME: `PanelMenu.Button`, a ogni apertura,
+// scrive sul menu un `max-height` pari all'area di lavoro del monitor primario.
+// Quel tetto non morde su una `St.BoxLayout`, che chiede sempre tutta l'altezza
+// dei propri figli e quindi ha un'altezza MINIMA pari alla sua altezza naturale
+// — il commento upstream sopra quella riga lo dice esplicitamente: «won't do any
+// good ... it's useful if part of the menu is scrollable». Una `St.ScrollView`
+// è quella parte: la sua altezza minima è indipendente dal contenuto, perché a
+// scorrere è il contenuto dentro la finestrella.
+//
+// Struttura, presa dal pattern che lo shell usa per i propri sotto-menu e che
+// clipboard-indicator usa per la history:
+//
+//     menu
+//      └─ wrapper (PopupMenuSection)   ← aggiunta al menu, così il menu la conosce
+//          └─ St.ScrollView            ← il tetto morde qui
+//              └─ self._section        ← le voci, ricostruite a ogni giro
+//
+// Il wrapper non è decorativo: una `St.ScrollView` appesa a `menu.box` a mano
+// resterebbe fuori dall'elenco delle voci del menu (`_getMenuItems` tiene solo i
+// figli con un `_delegate`), e la navigazione da tastiera del popup non vedrebbe
+// più niente.
+//
+// `overlay_scrollbars` perché una ScrollView in policy AUTOMATIC prenota
+// larghezza per la barra anche quando la barra non serve: in overlay la barra si
+// disegna sopra il contenuto, e comparire non sposta più le righe.
+export function mountScroll(self) {
+    const wrapper = new PopupMenu.PopupMenuSection();
+
+    self._scroll = new St.ScrollView({
+        hscrollbar_policy: St.PolicyType.NEVER,
+        vscrollbar_policy: St.PolicyType.AUTOMATIC,
+        overlay_scrollbars: true,
+        x_expand: true,
+    });
+    self._section = new PopupMenu.PopupMenuSection();
+    self._scroll.set_child(self._section.actor);
+
+    wrapper.actor.add_child(self._scroll);
+    self.menu.addMenuItem(wrapper);
+}
+
+// Tetto d'altezza della zona scorrevole, in pixel logici.
+//
+// Ricalcolato a ogni ricostruzione invece che fissato una volta: il monitor
+// primario può cambiare (dock agganciato, proiettore) e con lui l'area di
+// lavoro. L'area di lavoro è in pixel FISICI, il CSS misura in pixel logici →
+// va divisa per il fattore di scala, o su uno schermo HiDPI il tetto risulta il
+// doppio dello spazio che c'è davvero.
+function scrollMaxHeight() {
+    const workArea    = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
+    const scaleFactor = St.ThemeContext.get_for_stage(global.stage).scale_factor;
+    return Math.max(120, Math.round(workArea.height / scaleFactor) - MENU_VMARGIN_PX);
+}
+
 // ── Costruzione del menu ─────────────────────────────────────────────────────
 
 // NON chiude più con `updateBadge()`: il badge è la coda del canale D-Bus, non un
@@ -134,8 +210,12 @@ export function sessionLabel(session, project) {
 // `this._updateBadge()` — stesso ordine di prima, stessa doppia esecuzione
 // all'apertura del menu (l'handler `open-state-changed` lo chiama già da sé).
 export function buildMenu(self) {
-    self.menu.removeAll();
+    // Si svuota la SEZIONE, non il menu: `menu.removeAll()` distruggerebbe anche
+    // il contenitore scorrevole montato una volta sola da mountScroll, e da lì in
+    // poi le voci tornerebbero a impilarsi fuori schermo.
+    self._section.removeAll();
     self.menu.box.style = `min-width: ${MENU_MIN_WIDTH_PX}px;`;
+    self._scroll.style  = `max-height: ${scrollMaxHeight()}px;`;
     // cache usata anche da findNotificationWindow via self._winMap
     self._winMap = Desktop.resolveWindowMap(self._registry);
 
@@ -151,7 +231,7 @@ export function buildMenu(self) {
     if (self._loomRegistry.length === 0) {
         const empty = new PopupMenu.PopupMenuItem('— registry vuoto —');
         empty.setSensitive(false);
-        self.menu.addMenuItem(empty);
+        self._section.addMenuItem(empty);
     }
 }
 
@@ -236,14 +316,14 @@ export function addLoomProject(self, project) {
             item.menu.addMenuItem(li);
         }
 
-        self.menu.addMenuItem(item);
+        self._section.addMenuItem(item);
     } else {
         // Senza launch → NIENTE sotto-menu: riga inerte (highlight su hover) coi
         // soli bottoni inline. `activate:false` → il click sulla riga non attiva.
         const item = new PopupMenu.PopupBaseMenuItem({activate: false});
         hideOrnament(item);
         fillLoomHeader(self, item, project, wins, sessions);
-        self.menu.addMenuItem(item);
+        self._section.addMenuItem(item);
     }
 
     // Righe-sessione: una per sessione viva, subito sotto il cappello e nel
@@ -255,7 +335,7 @@ export function addLoomProject(self, project) {
     // menu — e i giri sono tanti, perché ogni annuncio D-Bus ricostruisce.
     const marks = Model.loadSessionMarks(project.dir);
     for (const s of cappedSessions(sessions))
-        self.menu.addMenuItem(sessionRow(self, s, project, marks));
+        self._section.addMenuItem(sessionRow(self, s, project, marks));
 }
 
 // Applica il cap e, se taglia, sostituisce la coda con una sentinella che

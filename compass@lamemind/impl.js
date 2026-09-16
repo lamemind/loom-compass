@@ -167,6 +167,8 @@ class CompassIndicator extends PanelMenu.Button {
         this._liveSessions = []; // registro ~/.claude/sessions filtrato sui vivi (T119)
         this._winMap             = null; // cache aggiornata a ogni buildMenu
         this._loomWins           = null; // cache window-map (project-level) progetti loom
+        this._scroll             = null; // St.ScrollView del popup — montata una volta (Menu.mountScroll)
+        this._section            = null; // PopupMenuSection dentro la scroll: qui buildMenu costruisce
         this._notificationSource = null;
 
         // ── Layout top-bar: [icona] [badge] ─────────────────────────────────
@@ -197,6 +199,9 @@ class CompassIndicator extends PanelMenu.Button {
         this._registry     = Model.loadLegacyRegistry(this._ext.path);
         this._loomRegistry = Model.loadLoomRegistry();
         this._liveSessions = Model.loadLiveSessions(this._channels);
+        // La zona scorrevole prima del primo menu, e mai più: `buildMenu` ci
+        // costruisce dentro e la dà per montata (`this._section`).
+        Menu.mountScroll(this);
         Menu.buildMenu(this);
         this._updateBadge();
 
