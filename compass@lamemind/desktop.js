@@ -408,12 +408,26 @@ const SAFE_MODEL = /^(fable|opus|sonnet|haiku)$/;
 /**
  * Riapre una conversazione chiusa come tab della finestra del progetto.
  *
- * `spec` = `{sessionId, taskId, model}` come li porta il sidecar. `taskId`
- * presente → ripresa SCOPED (la tab nasce con `LOOM_TASK` e col task nel
- * titolo); assente → ripresa spot (`--no-task`). Il modello viene passato
+ * `spec` = `{sessionId, taskId, model, note, title}` come li porta il sidecar.
+ * `taskId` presente → ripresa SCOPED (la tab nasce con `LOOM_TASK` e col task
+ * nel titolo); assente → ripresa spot (`--no-task`). Il modello viene passato
  * esplicito: senza `--model`, `deck-run` consulta il catalogo col kind implicito
  * `recap` — che oggi dà `fable` per coincidenza della riga di catalogo, non per
  * un default di ripresa.
+ *
+ * `--title-note` è obbligatorio quanto gli altri due, e per una ragione che non
+ * si vede fino a che non manca: il titolo della tab NON viene dal sidecar —
+ * `deck-run` lo compone da `.claude/loom-works.json` (emoji + nome) più il
+ * TaskID — quindi senza quel flag la tab nasce `<emoji> <nome> · <task>`, o
+ * `<emoji> <nome>` nuda su una spot, e non dice QUALE conversazione è. Con più
+ * pinnate dello stesso progetto riaperte, le tab risultano omonime. Il deck lo
+ * passa già sulle proprie riprese (`resumeArgs`); un secondo consumer che lo
+ * omette produce tab peggiori delle sue, senza nessun errore.
+ *
+ * Nota prima, residuo del titolo come ricambio: è la stessa cascata
+ * dell'etichetta di riga, e la nota è il valore che il deck passa. Il testo non
+ * si quota e non si valida qui — lo RIDUCE `_sane_note` dentro `deck-run`, che
+ * è una whitelist e sta là perché quel testo finisce dentro `bash -lc`.
  *
  * Non controlla se il transcript esiste ancora: uno `stat` porterebbe
  * `~/.claude/projects/` dentro i sorgenti dell'estensione, e leggere là dentro
@@ -435,10 +449,14 @@ export function launchResume(project, spec, ts, findProjectWindow) {
         const taskId = SAFE_TASK.test(spec.taskId ?? '')  ? spec.taskId : null;
         const model  = SAFE_MODEL.test(spec.model ?? '')  ? spec.model  : null;
         const dir    = projectDir(project);
+        // Maniglia nel titolo della tab: nota prima, residuo del titolo come
+        // ricambio. Ridotta da `_sane_note` dentro `deck-run`, non qui.
+        const nota   = (spec.note ?? '').trim() || (spec.title ?? '').trim();
 
         const spawnTab = (newWindow) => {
             const argv = [deckRun, taskId ?? '--no-task', '--resume', sid];
             if (model) argv.push('--model', model);
+            if (nota) argv.push('--title-note', nota);
             if (newWindow) argv.push('--new-window');
             try {
                 const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});

@@ -607,7 +607,15 @@ export function pinnedRow(self, project, entry) {
             self.menu.close();
             Desktop.launchResume(
                 project,
-                {sessionId, taskId: mark.taskId, model: mark.model},
+                {
+                    sessionId,
+                    taskId: mark.taskId,
+                    model: mark.model,
+                    // La maniglia per il titolo della tab: senza, le tab di più
+                    // pinnate dello stesso progetto nascono omonime.
+                    note: mark.note,
+                    title: mark.title,
+                },
                 ts,
                 findProjectWindow
             );
