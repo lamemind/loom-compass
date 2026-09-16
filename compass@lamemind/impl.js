@@ -196,10 +196,11 @@ class CompassIndicator extends PanelMenu.Button {
             style_class: 'ws-badge',
         });
 
-        // Consumo dell'account (5h e settimanale). MOCK: i numeri li produce un
-        // timer interno a usage.js, nessuna fonte è ancora collegata.
+        // Consumo dell'account (5h e settimanale). Il poller si tiene da sé il
+        // proprio timer e la propria richiesta in volo: qui resta solo la
+        // maniglia per fermarlo.
         this._usage = Usage.buildUsage();
-        this._usageTimer = Usage.startMock(this._usage);
+        this._usagePoll = Usage.startPolling(this._usage);
 
         box.add_child(this._icon);
         box.add_child(this._badge);
@@ -477,12 +478,13 @@ class CompassIndicator extends PanelMenu.Button {
     // ── Cleanup ──────────────────────────────────────────────────────────────
 
     destroy() {
-        // Prima di distruggere gli attori: un timeout GLib sopravvive all'attore
-        // e al `compass reload`, e al giro dopo scriverebbe su label già morte —
+        // Prima di distruggere gli attori: il timer del poller e la sua
+        // richiesta HTTP in volo sopravvivono entrambi all'attore e al
+        // `compass reload`, e al giro dopo scriverebbero su label già morte —
         // più un timer in più a ogni ricarica, che nessuno ferma fino al relogin.
-        if (this._usageTimer) {
-            GLib.Source.remove(this._usageTimer);
-            this._usageTimer = null;
+        if (this._usagePoll) {
+            this._usagePoll.stop();
+            this._usagePoll = null;
         }
         if (this._notificationSource) {
             this._notificationSource.destroy();
