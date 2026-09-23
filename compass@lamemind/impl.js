@@ -16,6 +16,10 @@
 //   dialog.js   il modale sulla conversazione in focus, e la sua risoluzione
 //   usage.js    il consumo dell'account in top bar: livelli, widget, mock
 //
+// `prefs.js` (la finestra delle impostazioni) NON è nel grafo: la carica un
+// altro processo, il servizio `org.gnome.Shell.Extensions`, e importa il solo
+// model.js. Con lo shell parla attraverso lo schema GSettings, non per import.
+//
 // Qui resta ciò che non può uscire: dove lo stato dell'istanza vive e dove i
 // moduli vengono cablati fra loro.
 
@@ -178,6 +182,7 @@ class CompassIndicator extends PanelMenu.Button {
         this._loomWins           = null; // cache window-map (project-level) progetti loom
         this._scroll             = null; // St.ScrollView del popup — montata una volta (Menu.mountScroll)
         this._section            = null; // PopupMenuSection dentro la scroll: qui buildMenu costruisce
+        this._footer             = null; // coda fissa «Impostazioni», fuori dalla scroll (Menu.mountFooter)
         // Rami espandibili del giro corrente, `<projectId>:<pinned|launch>` →
         // `{section, arrow}`. Ricostruita da `buildMenu` insieme ai widget che
         // indicizza.
@@ -229,8 +234,11 @@ class CompassIndicator extends PanelMenu.Button {
         this._loomRegistry = Model.loadLoomRegistry();
         this._liveSessions = Model.loadLiveSessions(this._channels);
         // La zona scorrevole prima del primo menu, e mai più: `buildMenu` ci
-        // costruisce dentro e la dà per montata (`this._section`).
+        // costruisce dentro e la dà per montata (`this._section`). La coda
+        // «Impostazioni» subito dopo, e anche lei una volta sola: `buildMenu`
+        // ne misura l'altezza per il tetto della zona scorrevole.
         Menu.mountScroll(this);
+        Menu.mountFooter(this);
 
         // Progetti nascosti cambiati dalla finestra delle impostazioni → il
         // menu si ricostruisce subito, senza reload dell'estensione. Il registry

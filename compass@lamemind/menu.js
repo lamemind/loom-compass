@@ -344,6 +344,44 @@ export function mountScroll(self) {
     self.menu.addMenuItem(wrapper);
 }
 
+// ── La coda fissa: «Impostazioni» ────────────────────────────────────────────
+
+// Monta, UNA volta e dopo `mountScroll`, la coda del popup: un separatore e la
+// voce che apre la finestra delle impostazioni (prefs.js). Sta FUORI dalla zona
+// scorrevole e fuori da `self._section`, per due ragioni:
+//  - `buildMenu` svuota solo la sezione, quindi la voce sopravvive alle
+//    ricostruzioni e c'è anche col registry vuoto;
+//  - resta sempre raggiungibile in fondo al popup, per quanti progetti e
+//    conversazioni ci siano sopra, senza scorrere.
+//
+// Il suo spazio va sottratto al tetto della zona scorrevole (`scrollMaxHeight`),
+// o a popup pieno la coda finirebbe oltre il bordo dello schermo.
+export function mountFooter(self) {
+    self._footer = new PopupMenu.PopupMenuSection();
+    self._footer.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+    const item = new PopupMenu.PopupMenuItem('Impostazioni');
+    item.connect('activate', () => openSettings(self));
+    self._footer.addMenuItem(item);
+
+    self.menu.addMenuItem(self._footer);
+}
+
+// Apre la finestra delle impostazioni. Non `self._ext.openPreferences()`, che
+// chiama la stessa funzione e ne scarta il ritorno: `openExtensionPrefs` ritorna
+// `false` SENZA log quando l'estensione non ha `hasPrefs`, e quel caso esiste.
+//
+// `hasPrefs` lo calcola lo shell una volta sola, quando CARICA l'estensione al
+// login (`prefs.js` presente sul disco o no), e disable/enable non lo ricalcola.
+// Fra il primo deploy di prefs.js e il relogin successivo la voce non apre
+// niente: senza il log sarebbe indistinguibile da un click che non arriva.
+function openSettings(self) {
+    const uuid = self._ext.uuid;
+    if (!Main.extensionManager.openExtensionPrefs(uuid, '', {}))
+        log(`[Compass] «Impostazioni»: nessuna finestra per ${uuid} — ` +
+            'lo shell non vede prefs.js (hasPrefs falso): serve un relogin');
+}
+
 // Tetto d'altezza della zona scorrevole, in pixel logici.
 //
 // Ricalcolato a ogni ricostruzione invece che fissato una volta: il monitor
@@ -351,10 +389,19 @@ export function mountScroll(self) {
 // lavoro. L'area di lavoro è in pixel FISICI, il CSS misura in pixel logici →
 // va divisa per il fattore di scala, o su uno schermo HiDPI il tetto risulta il
 // doppio dello spazio che c'è davvero.
-function scrollMaxHeight() {
+//
+// Sottrae anche la coda fissa (`mountFooter`), MISURATA e non stimata: la sua
+// altezza segue font e scala del tema, che una costante non conosce. La misura
+// è in pixel dello stage come l'area di lavoro, quindi si divide per lo stesso
+// fattore. L'attore è già sullo stage da `_init` — `PanelMenu.Button` appende il
+// menu a `Main.uiGroup` quando lo crea — quindi la misura vale anche a popup
+// chiuso e al primo giro.
+function scrollMaxHeight(self) {
     const workArea    = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
     const scaleFactor = St.ThemeContext.get_for_stage(global.stage).scale_factor;
-    return Math.max(120, Math.round(workArea.height / scaleFactor) - MENU_VMARGIN_PX);
+    const [, footerNatural] = self._footer.actor.get_preferred_height(-1);
+    const available = (workArea.height - footerNatural) / scaleFactor;
+    return Math.max(120, Math.round(available) - MENU_VMARGIN_PX);
 }
 
 // ── Costruzione del menu ─────────────────────────────────────────────────────
@@ -374,7 +421,7 @@ export function buildMenu(self) {
     // registro riparte vuoto, o `toggleSubMenu` toccherebbe un attore morto.
     self._subs = new Map();
     self.menu.box.style = `min-width: ${MENU_MIN_WIDTH_PX}px;`;
-    self._scroll.style  = `max-height: ${scrollMaxHeight()}px;`;
+    self._scroll.style  = `max-height: ${scrollMaxHeight(self)}px;`;
     // cache usata anche da findNotificationWindow via self._winMap
     self._winMap = Desktop.resolveWindowMap(self._registry);
 
