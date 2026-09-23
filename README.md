@@ -25,6 +25,8 @@ Il cappello mostra **un solo** pallino, per **rollup** degli stati figli con pri
 | `compass@lamemind/` | l'estensione GNOME (UUID dir, installabile via symlink) |
 | `compass@lamemind/extension.js` | **stub-loader** sottile: re-importa `impl.js` con cache-busting a ogni `enable()` |
 | `compass@lamemind/impl.js` | la logica vera (indicatore, menu, D-Bus, registry) |
+| `compass@lamemind/prefs.js` | la finestra delle impostazioni (GTK4/libadwaita, gira fuori dallo shell) |
+| `compass@lamemind/schemas/` | schema GSettings dell'estensione + il suo compilato |
 | `bin/compass` | bridge CLI: hook di stato Claude → D-Bus + `reload` |
 
 **Perché lo stub-loader**: GNOME Shell tiene `extension.js` in cache nel module loader e non lo rilegge senza restart dello shell — che su Wayland significa **relogin**. Lo stub è un guscio che a ogni `enable()` importa `impl.js` con una
@@ -58,6 +60,56 @@ Il pallino si popola dagli hook di Claude Code (`~/.claude/settings.json`), che 
 Lo stato è **keyed su `$PTYXIS_PROFILE`**, non sul titolo della finestra: il
 titolo è posseduto da `claude --name`, quindi non può portare anche lo stato →
 serve un canale separato. Fuori da Ptyxis la variabile non esiste e l'hook esce silenzioso, senza rompere la sessione.
+
+## Impostazioni
+
+La voce **Impostazioni**, in fondo al menu e fuori dalla zona che scorre, apre la finestra delle impostazioni dell'estensione (la stessa di `gnome-extensions prefs compass@lamemind`). La finestra elenca i progetti del registry nell'ordine del menu, con un interruttore ciascuno: spento = il progetto non ha una riga nel menu. Il cambio vale subito, senza reload.
+
+Nascondere un progetto toglie **solo la sua riga dal menu**. Badge in top bar, suono, notifica «Vai» e modale sulla conversazione in focus lo trattano come ogni altro progetto: il badge può quindi mostrare l'emoji di un progetto che nel menu non c'è. Con tutti i progetti nascosti il menu mostra `— tutti i progetti sono nascosti —`, non `— registry vuoto —`.
+
+### Chiavi dconf
+
+Le preferenze stanno nello schema GSettings dell'estensione, `org.gnome.shell.extensions.compass`, sotto `/org/gnome/shell/extensions/compass/`. Sono preferenze di **questa macchina**: il registry `/org/lamemind/loom/` descrive i progetti e lo scrive `loom-works init`, compass lo legge soltanto e non ci aggiunge niente.
+
+| Chiave | Tipo | Default | Cosa |
+| --- | --- | --- | --- |
+| `hidden-projects` | `as` | `[]` | id dei progetti nascosti dal menu |
+| `open-session-dialog` | `as` | `['<Super>c']` | scorciatoia del modale sulla conversazione in focus |
+
+`hidden-projects` elenca i **nascosti**, non i visibili: un progetto registrato dopo compare nel menu da sé. Un id che non è più nel registry resta nella lista senza effetto, e la finestra non lo mostra.
+
+Le chiavi si leggono e si scrivono anche da terminale, e il menu segue anche lì senza reload:
+
+```bash
+dconf read  /org/gnome/shell/extensions/compass/hidden-projects
+dconf write /org/gnome/shell/extensions/compass/hidden-projects "['money', 'cc-host']"
+dconf reset /org/gnome/shell/extensions/compass/hidden-projects
+```
+
+### Il primo avvio della finestra chiede un relogin
+
+GNOME Shell decide se un'estensione ha una finestra di impostazioni **una volta sola**, quando la carica al login: guarda se `prefs.js` c'è sul disco. Un `compass reload` non rifà quel controllo. Su un'installazione che è salita a questa versione senza relogin, quindi, la voce **Impostazioni** non apre niente e il journal dello shell registra `«Impostazioni»: nessuna finestra per compass@lamemind`. Dopo un relogin funziona.
+
+Nell'attesa la finestra si apre chiamando direttamente il servizio che la ospita, che quel controllo non lo fa:
+
+```bash
+gdbus call --session --dest org.gnome.Shell.Extensions \
+  --object-path /org/gnome/Shell/Extensions \
+  --method org.gnome.Shell.Extensions.OpenExtensionPrefs compass@lamemind '' '{}'
+```
+
+La finestra gira in un processo separato dallo shell, che si chiude pochi secondi dopo la chiusura della finestra: un edit a `prefs.js` si vede alla riapertura successiva, senza `compass reload`.
+
+### Modificare lo schema
+
+Lo schema compilato, `schemas/gschemas.compiled`, è versionato: GNOME Shell legge quello, non l'XML. Dopo un edit a `org.gnome.shell.extensions.compass.gschema.xml`:
+
+```bash
+glib-compile-schemas --strict compass@lamemind/schemas/
+compass reload
+```
+
+XML e compilato vanno nello stesso commit. Una chiave nuova si vede dopo il `compass reload`, senza relogin.
 
 ## Registry — due layer, in coesistenza
 
