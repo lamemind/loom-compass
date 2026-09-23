@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Schema GSettings dell'estensione. Unica chiave: la scorciatoia globale che apre
-  il modale sulla conversazione in focus (T159).
+  Schema GSettings dell'estensione: preferenze di compass su QUESTA macchina, non
+  fatti del progetto. Il registry /org/lamemind/loom/ lo scrivono gli script del
+  plugin a partire dal file del progetto, e compass lo legge soltanto: una sua
+  preferenza lì dentro mescolerebbe un dato del progetto con una scelta di chi
+  guarda il menu.
+
+  ── open-session-dialog ──────────────────────────────────────────────────────
+
+  La scorciatoia globale che apre il modale sulla conversazione in focus (T159).
 
   Il tipo è `as` (array di stringhe) e non `s` perché è quello che
   `global.display.add_keybinding` pretende: la stessa azione può avere più
@@ -16,6 +23,23 @@
 
   Resta configurabile a mano senza toccare il codice:
     dconf write /org/gnome/shell/extensions/compass/open-session-dialog "['<Super>y']"
+
+  ── hidden-projects ──────────────────────────────────────────────────────────
+
+  Gli id dei progetti del registry che il menu della top bar non mostra (T164).
+  La scrive la finestra delle impostazioni (prefs.js), la legge il render del
+  menu.
+
+  Si salvano i NASCOSTI e non i visibili: con una lista di visibili ogni progetto
+  registrato dopo resterebbe fuori dal menu finché qualcuno non lo abilita, in
+  silenzio. Così un progetto nuovo compare da sé.
+
+  Un id che non esiste più nel registry resta qui senza effetto: il filtro
+  confronta per id i soli progetti esistenti, e il modello non ha un deregister
+  dei progetti da cui far partire una pulizia.
+
+  Nasconde la sola riga del menu: badge, suono, notifica e modale trattano il
+  progetto come ogni altro.
 -->
 <schemalist gettext-domain="compass">
   <schema id="org.gnome.shell.extensions.compass"
@@ -27,6 +51,15 @@
         Combinazione che apre il modale di compass sulla conversazione Claude Code
         ospitata dalla tab in focus: pin, nota e priorità, senza passare dal menu
         della top bar.
+      </description>
+    </key>
+    <key name="hidden-projects" type="as">
+      <default>[]</default>
+      <summary>Progetti nascosti dal menu</summary>
+      <description>
+        Id dei progetti del registry loom che il menu di compass non mostra. Un
+        progetto assente da questa lista è visibile, compreso uno registrato
+        dopo.
       </description>
     </key>
   </schema>
