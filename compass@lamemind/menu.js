@@ -384,17 +384,38 @@ export function buildMenu(self) {
     // hook D-Bus keyed su PTYXIS_PROFILE).
 
     // ── Registry loom (dconf) — unica sorgente del menu ───────────────────
+    //
+    // Le finestre si risolvono sul registry INTERO, nascosti compresi: il
+    // matcher sceglie per nome più lungo fra tutti i progetti, e togliergli un
+    // candidato potrebbe assegnare la finestra di un progetto nascosto a uno
+    // visibile col nome più corto.
     self._loomWins = Desktop.resolveLoomWindows(self._loomRegistry);
-    for (const project of self._loomRegistry) addLoomProject(self, project);
 
-    if (self._loomRegistry.length === 0) {
-        const empty = new PopupMenu.PopupMenuItem('— registry vuoto —');
-        empty.setSensitive(false);
-        self._section.addMenuItem(empty);
-    }
+    // Progetti nascosti dalla finestra delle impostazioni (T164). Il filtro sta
+    // QUI e solo qui, sul render della riga: `self._loomRegistry` alimenta anche
+    // badge, suono, notifica «Vai» e il modale sulla conversazione in focus, e
+    // un filtro alla fonte li cambierebbe tutti. Ne segue che il badge può
+    // mostrare l'emoji di un progetto che nel menu non c'è.
+    const hidden  = new Set(self._settings.get_strv(Model.HIDDEN_PROJECTS_KEY));
+    const visible = self._loomRegistry.filter(p => !hidden.has(p.id));
+    for (const project of visible) addLoomProject(self, project);
+
+    // Due vuoti diversi, due righe diverse: un registry vuoto si riempie con
+    // `loom-works init`, un menu vuoto per filtro si riempie dalle impostazioni.
+    if (self._loomRegistry.length === 0)
+        addInertRow(self, '— registry vuoto —');
+    else if (visible.length === 0)
+        addInertRow(self, '— tutti i progetti sono nascosti —');
 
     // Ultimo passo, e per forza: riapre sui widget appena costruiti.
     restoreOpenSubMenu(self);
+}
+
+// Riga di solo testo, non cliccabile, nella zona scorrevole.
+function addInertRow(self, text) {
+    const item = new PopupMenu.PopupMenuItem(text);
+    item.setSensitive(false);
+    self._section.addMenuItem(item);
 }
 
 // Voce progetto loom = UNA riga self-contained (merge vecchio+nuovo), non più

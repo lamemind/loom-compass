@@ -79,7 +79,10 @@ const KEYBINDING_OPEN_DIALOG = 'open-session-dialog';
 // argomento fallisce con «Expected type string for argument 'schema_id' but got
 // type undefined» su un file che sul disco è corretto. Il campo resta comunque
 // in metadata.json, dove lo cerca chi installa da zero.
-const SETTINGS_SCHEMA_ID = 'org.gnome.shell.extensions.compass';
+//
+// La costante vive in model.js: la legge anche prefs.js, che gira in un altro
+// processo e non può importare questo file.
+const SETTINGS_SCHEMA_ID = Model.SETTINGS_SCHEMA_ID;
 
 // ── D-Bus interface ──────────────────────────────────────────────────────────
 
@@ -154,9 +157,12 @@ const CompassIndicator = GObject.registerClass(
 {GTypeName: 'CompassIndicator_' + GLib.get_monotonic_time()},
 class CompassIndicator extends PanelMenu.Button {
 
-    _init(extensionObj) {
+    _init(extensionObj, settings) {
         super._init(0.0, 'Project Compass');
         this._ext       = extensionObj;
+        // Le preferenze dell'estensione (Gio.Settings), di proprietà di
+        // CompassImpl: l'indicatore le legge e ne ascolta i cambi, non le crea.
+        this._settings  = settings;
         this._sessions  = new Map(); // profileId → {state, seen}
         this._sessionStates = new Map(); // sessionId → {state} — canale per-sessione (T119)
         // I due canali di stato in un oggetto solo, passato alle funzioni di
@@ -225,6 +231,18 @@ class CompassIndicator extends PanelMenu.Button {
         // La zona scorrevole prima del primo menu, e mai più: `buildMenu` ci
         // costruisce dentro e la dà per montata (`this._section`).
         Menu.mountScroll(this);
+
+        // Progetti nascosti cambiati dalla finestra delle impostazioni → il
+        // menu si ricostruisce subito, senza reload dell'estensione. Il registry
+        // non ha un watch (si rilegge all'apertura del menu), questa chiave sì.
+        //
+        // Connesso PRIMA del primo `buildMenu`, che legge la chiave: GSettings
+        // emette `changed::<chiave>` solo per le chiavi lette almeno una volta
+        // con un handler già connesso. Connesso dopo, il primo cambio andrebbe
+        // perso fino al prossimo giro di menu.
+        this._hiddenChangedId = this._settings.connect(
+            `changed::${Model.HIDDEN_PROJECTS_KEY}`, () => this._refreshMenu());
+
         Menu.buildMenu(this);
         this._updateBadge();
 
@@ -496,6 +514,13 @@ class CompassIndicator extends PanelMenu.Button {
     // ── Cleanup ──────────────────────────────────────────────────────────────
 
     destroy() {
+        // Il Gio.Settings sopravvive all'indicatore (lo tiene CompassImpl fino
+        // al disable): senza disconnect, un cambio dalla finestra delle
+        // impostazioni ricostruirebbe il menu di un attore già distrutto.
+        if (this._hiddenChangedId) {
+            this._settings.disconnect(this._hiddenChangedId);
+            this._hiddenChangedId = null;
+        }
         // Prima di distruggere gli attori: il timer del poller e la sua
         // richiesta HTTP in volo sopravvivono entrambi all'attore e al
         // `compass reload`, e al giro dopo scriverebbero su label già morte —
@@ -525,7 +550,7 @@ export class CompassImpl {
         this._settings = ext.getSettings(SETTINGS_SCHEMA_ID);
 
         // Indicatore panel — `ext` = l'oggetto Extension (per ext.path, ecc.)
-        this._indicator = new CompassIndicator(ext);
+        this._indicator = new CompassIndicator(ext, this._settings);
         Main.panel.addToStatusArea('project-compass', this._indicator);
 
         // Servizio D-Bus

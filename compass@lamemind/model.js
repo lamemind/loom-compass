@@ -209,6 +209,25 @@ export function projectByBinding(loomRegistry, profileId) {
     ) ?? null;
 }
 
+// ── Preferenze di compass — schema GSettings (T164) ──────────────────────────
+//
+// Stanno qui e non in impl.js perché le leggono DUE processi: lo shell (impl.js,
+// menu.js) e la finestra delle impostazioni (prefs.js), che gira nel servizio
+// `org.gnome.Shell.Extensions` e non può importare impl.js — impl.js importa i
+// moduli `resource:///org/gnome/shell/ui/*`, che fuori dallo shell non esistono.
+// Questo file importa solo GLib e Gio, quindi entra in entrambi.
+//
+// Nomi e tipi sono dichiarati in `schemas/org.gnome.shell.extensions.compass
+// .gschema.xml`: una stringa sbagliata qui non fallisce all'import ma al primo
+// `get_strv`, che SOLLEVA su una chiave assente dallo schema.
+
+export const SETTINGS_SCHEMA_ID = 'org.gnome.shell.extensions.compass';
+
+// Id dei progetti che il menu non mostra. Si salvano i nascosti e non i
+// visibili: un progetto registrato dopo compare da sé, senza passare dalla
+// finestra delle impostazioni.
+export const HIDDEN_PROJECTS_KEY = 'hidden-projects';
+
 // ── Registro dei processi vivi — vista R/O per-sessione (T119) ───────────────
 
 // `~` iniziale espanso: il registry dconf può portare la dir in forma tilde,
