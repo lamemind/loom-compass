@@ -119,6 +119,15 @@ export function buildUsage() {
     const apply = (label, window, data) => {
         const pct       = Math.min(100, Math.round(data.pct));
         const remaining = data.resetsAt - nowSeconds();
+        // Reset già passato: la finestra si è azzerata mentre la fonte taceva, e
+        // la percentuale in mano descrive un budget che non esiste più. È il caso
+        // in cui un dato vecchio non invecchia — salta di colpo dal 90% allo zero
+        // — quindi sparisce invece di restare a mentire.
+        if (remaining <= 0) {
+            label.text  = UNKNOWN_TEXT;
+            label.style = valueStyle(0);
+            return;
+        }
         label.text  = `${pct}%`;
         label.style = valueStyle(levelOf(pct, remaining, window));
     };
@@ -151,16 +160,27 @@ const OAUTH_BETA = 'oauth-2025-04-20';
 
 const CREDENTIALS_PATH = GLib.build_filenamev([GLib.get_home_dir(), '.claude', '.credentials.json']);
 
-// Un minuto: sotto carico la quota della finestra da 5 ore si muove di qualche
-// punto al minuto, quindi più fitto non aggiunge informazione, e più rado
-// mostrerebbe una cifra già superata.
-const POLL_SECONDS = 60;
+// Cinque minuti. Un poll al minuto si prende un 429 (`rate_limit_error`) dopo
+// una mezz'ora: l'endpoint ha un tetto suo, misurato sul ritmo con cui Claude
+// Code lo interroga — cioè a richiesta, non in continuo. Il prezzo è che la
+// cifra può essere vecchia di cinque minuti, e sotto carico pesante sono
+// qualche punto percentuale.
+const POLL_SECONDS = 300;
 
-// Quanti giri a vuoto si tollerano prima di dichiarare il dato ignoto. Tre
-// minuti di buco reggono il caso normale — rete che manca per un momento, token
-// nel mezzo del rinnovo — senza arrivare a coprire un token scaduto sul serio,
-// che a quel punto va mostrato per quello che è.
-const FAILURES_BEFORE_UNKNOWN = 3;
+// Il tetto vero non è pubblicato, quindi dopo un rifiuto si raddoppia l'attesa
+// invece di insistere allo stesso ritmo: 5, 10, 20, 40 minuti, poi fermi a
+// un'ora. Il primo successo azzera il conto.
+const BACKOFF_CAP_SECONDS = 3600;
+
+// La cifra si ridisegna ogni minuto anche senza rete: il livello dipende dal
+// tempo che manca al reset, che scorre fra un poll e l'altro — un'enfasi ferma
+// all'ultima risposta descriverebbe un'autonomia che nel frattempo è cambiata.
+const RENDER_SECONDS = 60;
+
+// Oltre questa età il dato non si mostra più. La soglia è sul TEMPO e non sul
+// numero di tentativi falliti: con l'attesa che raddoppia, contare i tentativi
+// vorrebbe dire tenere in vista una cifra vecchia di ore.
+const MAX_AGE_SECONDS = 15 * 60;
 
 function nowSeconds() {
     return Math.floor(GLib.get_real_time() / 1e6);
@@ -208,24 +228,37 @@ function windowFrom(raw) {
 export function startPolling(widget) {
     const session     = new Soup.Session({timeout: 10});
     const cancellable = new Gio.Cancellable();
+    let lastGood      = null;  // {fiveHour, sevenDay, at} — ultima risposta buona
     let failures      = 0;
     let stopped       = false;
+    let fetchTimerId  = 0;
+    let renderTimerId = 0;
+
+    // Disegno: legge solo l'ultima risposta buona, non tocca la rete.
+    const render = () => {
+        if (!lastGood || nowSeconds() - lastGood.at > MAX_AGE_SECONDS) {
+            widget.setUnknown();
+            return;
+        }
+        widget.set(lastGood.fiveHour, lastGood.sevenDay);
+    };
 
     const onFailure = (reason) => {
         failures += 1;
-        if (failures === FAILURES_BEFORE_UNKNOWN) {
-            // Una volta sola per caduta, non a ogni giro: il log serve a
-            // distinguere «la fonte tace» da «il widget è rotto», non a contare
-            // i tentativi.
+        if (failures === 1) {
+            // Solo il primo rifiuto di una caduta: al ritmo del backoff i
+            // successivi non aggiungono niente, e il log serve a distinguere
+            // «la fonte rifiuta» da «il widget è rotto».
             log(`[Compass] consumo account non disponibile: ${reason}`);
         }
-        if (failures >= FAILURES_BEFORE_UNKNOWN) widget.setUnknown();
+        render();
     };
 
     const poll = () => {
         const token = readAccessToken();
         if (!token) {
             onFailure('nessun token in ~/.claude/.credentials.json');
+            scheduleNextFetch();
             return;
         }
 
@@ -236,39 +269,62 @@ export function startPolling(widget) {
         session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, cancellable, (sess, result) => {
             if (stopped) return;
             try {
-                const bytes  = sess.send_and_read_finish(result);
-                const status = message.get_status();
-                if (status !== Soup.Status.OK) {
+                const bytes = sess.send_and_read_finish(result);
+                // `message.status_code` e non `get_status()`: il secondo marshalla
+                // il numero nell'enum SoupStatus e SOLLEVA su un codice che quella
+                // enum non elenca — 429 fra questi. L'eccezione arriverebbe prima
+                // della riga che distingue i casi, e ogni rifiuto diventerebbe un
+                // generico errore di parsing.
+                const status = message.status_code;
+                if (status !== 200) {
+                    // 429 = stiamo chiedendo troppo spesso; ci pensa il backoff.
                     // 401 = token scaduto e nessuna sessione Claude Code lo ha
                     // ancora rinnovato. Non lo rinnoviamo da qui: il refresh
                     // riscriverebbe lo stesso file che Claude Code riscrive, e
                     // vincerebbe l'ultimo che scrive.
-                    onFailure(`HTTP ${status}`);
+                    onFailure(`HTTP ${status} ${message.get_reason_phrase()}`);
+                    scheduleNextFetch();
                     return;
                 }
 
-                const payload   = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-                const fiveHour  = windowFrom(payload.five_hour);
-                const sevenDay  = windowFrom(payload.seven_day);
+                const payload  = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                const fiveHour = windowFrom(payload.five_hour);
+                const sevenDay = windowFrom(payload.seven_day);
                 if (!fiveHour || !sevenDay) {
                     onFailure('risposta senza five_hour/seven_day utilizzabili');
+                    scheduleNextFetch();
                     return;
                 }
 
                 failures = 0;
-                widget.set(fiveHour, sevenDay);
+                lastGood = {fiveHour, sevenDay, at: nowSeconds()};
+                render();
             } catch (e) {
                 // Include l'annullamento della richiesta in volo su `stop()`:
                 // lì `stopped` è già true e la callback è uscita sopra, quindi
                 // quello che arriva qui è rete o parsing.
                 onFailure(e.message);
             }
+            scheduleNextFetch();
         });
     };
 
+    // Un timer one-shot riarmato ogni volta, invece di un intervallo fisso: è
+    // ciò che permette all'attesa di raddoppiare dopo un rifiuto e di tornare
+    // alla cadenza piena al primo successo.
+    function scheduleNextFetch() {
+        if (stopped || fetchTimerId) return;
+        const delay = Math.min(POLL_SECONDS * 2 ** failures, BACKOFF_CAP_SECONDS);
+        fetchTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, delay, () => {
+            fetchTimerId = 0;
+            poll();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     poll();
-    const timerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, POLL_SECONDS, () => {
-        poll();
+    renderTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RENDER_SECONDS, () => {
+        render();
         return GLib.SOURCE_CONTINUE;
     });
 
@@ -276,7 +332,9 @@ export function startPolling(widget) {
         stop() {
             stopped = true;
             cancellable.cancel();
-            GLib.Source.remove(timerId);
+            if (fetchTimerId)  GLib.Source.remove(fetchTimerId);
+            if (renderTimerId) GLib.Source.remove(renderTimerId);
+            fetchTimerId = renderTimerId = 0;
         },
     };
 }
