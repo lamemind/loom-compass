@@ -422,13 +422,11 @@ export function buildMenu(self) {
     self._subs = new Map();
     self.menu.box.style = `min-width: ${MENU_MIN_WIDTH_PX}px;`;
     self._scroll.style  = `max-height: ${scrollMaxHeight(self)}px;`;
-    // cache usata anche da findNotificationWindow via self._winMap
-    self._winMap = Desktop.resolveWindowMap(self._registry);
 
     // Il blocco legacy (projects.json) NON viene più renderizzato: le sue voci
     // duplicavano i cappelli loom. `_registry` resta caricato perché serve
-    // ancora a risolvere finestre/sessioni per profilo (resolveWindowMap,
-    // hook D-Bus keyed su PTYXIS_PROFILE).
+    // ancora al canale di stato (impl.js `setState`): un progetto che vive solo
+    // lì annuncia col profilo Ptyxis che porta in projects.json.
 
     // ── Registry loom (dconf) — unica sorgente del menu ───────────────────
     //

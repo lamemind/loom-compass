@@ -179,7 +179,6 @@ class CompassIndicator extends PanelMenu.Button {
         this._registry  = [];
         this._loomRegistry = []; // registry dconf loom (T34) — cappelli + surface
         this._liveSessions = []; // registro ~/.claude/sessions filtrato sui vivi (T119)
-        this._winMap             = null; // cache aggiornata a ogni buildMenu
         this._loomWins           = null; // cache window-map (project-level) progetti loom
         this._scroll             = null; // St.ScrollView del popup — montata una volta (Menu.mountScroll)
         this._section            = null; // PopupMenuSection dentro la scroll: qui buildMenu costruisce
@@ -472,14 +471,7 @@ class CompassIndicator extends PanelMenu.Button {
                 // timestamp corrente/0 la focus-stealing-prevention di Mutter lo scarta
                 // (stesso vincolo del click sul bottone-nome, §Coalescing).
                 const ts  = global.get_current_time();
-                const win = Desktop.findNotificationWindow(
-                    {
-                        loomRegistry:   this._loomRegistry,
-                        legacyRegistry: this._registry,
-                        winMap:         this._winMap,
-                    },
-                    project, loomProject
-                );
+                const win = Desktop.findNotificationWindow(this._loomRegistry, loomProject);
                 // Log sul MISS: senza, un matcher che non aggancia più è indistinguibile
                 // da un bottone che non fa niente — è esattamente così che il difetto
                 // sopra è passato inosservato.

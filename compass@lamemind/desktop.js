@@ -60,34 +60,6 @@ export function getPtyxisWindows() {
     });
 }
 
-// Assegna ogni finestra Ptyxis al progetto con la label più lunga che appare
-// nel titolo (longest-match). Evita che una label base (es. "myproj") rubi
-// le finestre di lane con label "myproj [lane]".
-export function resolveWindowMap(legacyRegistry, wins = getPtyxisWindows()) {
-    const map = new Map(); // profileId → MetaWindow
-
-    for (const win of wins) {
-        const title = win.get_title() ?? '';
-        let best = null, bestLen = 0;
-        for (const p of legacyRegistry) {
-            if (title.includes(p.label) && p.label.length > bestLen) {
-                bestLen = p.label.length;
-                best    = p;
-            }
-        }
-        // Prima finestra trovata per progetto vince; le successive ignorata
-        if (best && !map.has(best.profile))
-            map.set(best.profile, win);
-    }
-    return map;
-}
-
-// `winMap` = la cache costruita da buildMenu; `null` → risoluzione istantanea.
-export function findWindowForProject(winMap, legacyRegistry, project) {
-    const map = winMap ?? resolveWindowMap(legacyRegistry);
-    return map.get(project.profile) ?? null;
-}
-
 // Risoluzione finestra a livello PROGETTO (T34). Fix del sintomo "focus sulla
 // tab deck → il progetto appare faded/spento": le surface (claude, deck,
 // terminal) sono TAB, non finestre distinte — col coalescing vivono nella
@@ -528,33 +500,6 @@ export function focusWindow(win, ts) {
     win.activate(t);
 }
 
-// ── Riapertura sessione chiusa ────────────────────────────────────────────────
-
-// CODICE MORTO: nessun chiamante, e lavora sul modello legacy (`project.profile`,
-// `project.label` di projects.json). Spostato verbatim — la sua rimozione è già
-// in perimetro a T135, e allinearlo al modello loom mentre passa sarebbe scrivere
-// comportamento nuovo dentro un refactor, su una funzione che nessuno esegue.
-export function launchSession(project) {
-    try {
-        const home = GLib.get_home_dir();
-        let dir = project.dir || home;
-        if (dir.startsWith('~')) dir = home + dir.slice(1);
-
-        // `--name = project.label`: il titolo finestra torna a combaciare con
-        // project.label, così findWindowForProject riaggancia la sessione.
-        // Argv (no shell): nome passato come $1 a bash -c → niente quoting su emoji/spazi.
-        const argv = [
-            'ptyxis', '--new-window',
-            `--tab-with-profile=${project.profile}`,
-            '-d', dir,
-            '--', 'bash', '-c', 'claude --name "$1"; exec bash', 'bash', project.label,
-        ];
-        Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE);
-    } catch (e) {
-        logError(e, '[Compass] launchSession');
-    }
-}
-
 // ── Audio ────────────────────────────────────────────────────────────────────
 
 export function playSound(eventId) {
@@ -575,24 +520,17 @@ export function playSound(eventId) {
 
 // ── Finestra da focussare al click su "Vai" ──────────────────────────────────
 //
-// Il matcher LEGACY (resolveWindowMap, keyed sul campo `label` di projects.json)
-// non aggancia più niente: da T58 (titoli tab senza owner) il titolo di una tab è
-// `{emoji} {name}` — `🧵 loom-works · T74` — mentre projects.json porta ancora
-// l'owner dentro la label — `🧵 LOCAL loom-works`. `title.includes(label)` è quindi
-// sempre falso → win null → il bottone "Vai" restava INERTE, e in silenzio: il null
-// moriva dentro `if (win)`, nessun errore, nessun log.
-// Priorità perciò al matcher loom (insieme di chiavi per-surface); il legacy resta
-// come fallback per i progetti che vivono solo in projects.json.
-export function findNotificationWindow(registries, project, loomProject) {
-    if (loomProject) {
-        // Risoluzione FRESCA, non la cache `_loomWins` di buildMenu: una notifica
-        // resta nello shade finché non la chiudi, quindi fra la sua comparsa e il
-        // click possono passare decine di minuti — nel frattempo la finestra può
-        // essere stata chiusa, riaperta o rititolata.
-        const win = resolveLoomWindows(registries.loomRegistry).get(loomProject.id)?.win;
-        if (win) return win;
-    }
-    return project
-        ? findWindowForProject(registries.winMap, registries.legacyRegistry, project)
-        : null;
+// Solo il matcher loom (insieme di chiavi per-surface sul `name`). Un progetto
+// che vive solo in projects.json non ha finestra risolvibile: il matcher legacy
+// keyed sulla `label` di quel file non agganciava più niente da quando i titoli
+// delle tab non portano l'owner (`🧵 loom-works · T74` contro `🧵 LOCAL
+// loom-works`), quindi il suo «Vai» era già inerte. Il chiamante logga il miss.
+//
+// Risoluzione FRESCA, non la cache `_loomWins` di buildMenu: una notifica resta
+// nello shade finché non la chiudi, quindi fra la sua comparsa e il click possono
+// passare decine di minuti — nel frattempo la finestra può essere stata chiusa,
+// riaperta o rititolata.
+export function findNotificationWindow(loomRegistry, loomProject) {
+    if (!loomProject) return null;
+    return resolveLoomWindows(loomRegistry).get(loomProject.id)?.win ?? null;
 }
