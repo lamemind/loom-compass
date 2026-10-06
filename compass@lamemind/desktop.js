@@ -194,15 +194,15 @@ export function resolveDefaultSurface(project) {
 
 // ── Lancio delle surface tracked ─────────────────────────────────────────────
 
-// Apre una surface tracked (claude/deck) col profilo bound. Il custom-command
-// del profilo (`claude --name <label>` per claude, `node …/deck` per deck)
-// parte da sé → il titolo diventa matchabile e la finestra si aggancia al
-// progetto al giro di refresh dopo.
+// Apre una surface tracked (claude/deck) o la shell del progetto, sempre senza
+// profilo Ptyxis: la tab nasce dal profilo di default e il comando lo porta
+// l'argv. Il titolo è matchabile da subito (`-T`), quindi la finestra si
+// aggancia al progetto al giro di refresh dopo.
 //
 // COALESCING (Slice 2): tutte le surface di UNO stesso progetto devono finire
 // come tab nella STESSA finestra Ptyxis, non una finestra ciascuna. Ptyxis
 // (v50.1, verificato via `--help` + introspezione D-Bus) NON ha targeting
-// per-finestra: `--tab-with-profile` va SEMPRE nella finestra ATTIVA; le azioni
+// per-finestra: `--tab` va SEMPRE nella finestra ATTIVA; le azioni
 // per-finestra su /org/gnome/Ptyxis/window/N espongono solo tab.read-only /
 // interface-style (niente new-tab). Unica via = focus-then-tab.
 //
@@ -252,9 +252,29 @@ export function launchTracked(project, kind, ts, findProjectWindow) {
                     ? ['ptyxis', '--new-window', '-T', title, '-d', dir]
                     : ['ptyxis', '--tab',        '-T', title, '-d', dir];
             } else {
+                // claude: stessa forma di `deck-run` (`ptyxis --tab -d -T --
+                // bash -lc`). Il profilo dedicato portava due cose, e qui si
+                // ricompongono entrambe nel comando:
+                //  - il TITOLO `<emoji> <name>`: `-T` vale per l'istante prima
+                //    che claude parta, poi lo tiene `claude --name`, che è il
+                //    canale autoritativo e lo riscrive a ogni turno;
+                //  - la CHIAVE DI STATO, `PTYXIS_PROFILE=<chiave>` davanti a
+                //    claude. Ptyxis esporta da sé PTYXIS_PROFILE in ogni tab, ma
+                //    col valore del profilo di default: senza il prefisso la
+                //    sessione annuncerebbe una chiave che nessun progetto
+                //    dichiara, e il badge resterebbe fermo senza errori.
+                // Titolo e chiave entrano come `$1`/`$2` di `bash -lc`, non
+                // interpolati nella riga: arrivano dal registry, e un valore
+                // passato come argomento non ha quoting da sbagliare.
+                // `exec bash` tiene viva la tab all'uscita di claude, come il
+                // custom-command del vecchio profilo.
+                const title = project.label;
+                const inner = uuid
+                    ? 'PTYXIS_PROFILE="$2" claude --name "$1"; exec bash'
+                    : 'claude --name "$1"; exec bash';
                 argv = newWindow
-                    ? ['ptyxis', '--new-window', `--tab-with-profile=${uuid}`, '-d', dir]
-                    : ['ptyxis', `--tab-with-profile=${uuid}`, '-d', dir];
+                    ? ['ptyxis', '--new-window', '-d', dir, '-T', title, '--', 'bash', '-lc', inner, 'bash', title, uuid]
+                    : ['ptyxis', '--tab',        '-d', dir, '-T', title, '--', 'bash', '-lc', inner, 'bash', title, uuid];
             }
             try {
                 Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE);
