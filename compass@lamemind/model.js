@@ -142,7 +142,7 @@ export function loadLoomRegistry() {
 
         const byId = new Map();
         const get  = (id) => {
-            if (!byId.has(id)) byId.set(id, {id, launch: new Map(), bindings: {}});
+            if (!byId.has(id)) byId.set(id, {id, launch: new Map()});
             return byId.get(id);
         };
 
@@ -166,12 +166,6 @@ export function loadLoomRegistry() {
                     label:   kv.has('label') ? gvStr(kv.get('label')) : null,
                     command: gvStr(kv.get('command')) ?? '',
                 });
-            } else if ((m = g.match(/^projects\/([^/]+)\/bindings\/([^/]+)$/))) {
-                // bindings/<kind>/profile → UUID Ptyxis: serve a lanciare la
-                // surface tracked quando nessuna finestra è aperta (Slice 2).
-                const p    = get(m[1]);
-                const uuid = gvStr(kv.get('profile'));
-                if (uuid) p.bindings[m[2]] = uuid;
             }
         }
 
@@ -186,7 +180,6 @@ export function loadLoomRegistry() {
                 docsRoot: p.docsRoot, // sottocartella tasks.md (derivata dal file) → env deck
                 defaultSurface: p.defaultSurface, // surface del bottone-nome; null → terminal
                 order:    p.order, // posizione nel blocco loom; null → coda alfabetica
-                bindings: p.bindings, // {kind → uuid Ptyxis} per il launch tracked
                 label:    `${p.emoji} ${p.name}`, // derivata, mai scritta
                 launch:   [...p.launch.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v),
             }))
@@ -199,14 +192,22 @@ export function loadLoomRegistry() {
     }
 }
 
-// Mappa inversa binding UUID → progetto, estratta dall'inline che `setState`
-// (impl.js) usa per risolvere il cappello loom da un `profileId` e poter
-// notificare. Chi ne ha bisogno una seconda volta (badge, T149) la richiama
-// invece di riscrivere lo stesso `find`.
-export function projectByBinding(loomRegistry, profileId) {
-    return loomRegistry.find(
-        p => Object.values(p.bindings ?? {}).includes(profileId)
-    ) ?? null;
+// Chiave di stato → progetto. La chiave con cui una sessione si annuncia sul
+// canale di progetto (`PTYXIS_PROFILE`, nome storico) È l'`id` del progetto: la
+// mette davanti a `claude` chi spawna la tab — `launchTracked` qui, `deck-run`
+// lato deck — e nessuno la scrive nel registry. Non è più l'UUID di un profilo
+// Ptyxis: una stringa opaca, che nessuna chiamata a Ptyxis usa.
+//
+// Una sessione che annuncia una chiave diversa (`claude` digitato in una tab
+// aperta a mano, che porta l'UUID del profilo di default) non risolve a nessun
+// progetto: niente badge né suono. La sua riga nel menu resta, perché viene dal
+// registro dei processi vivi e si lega al progetto per cartella, non per chiave.
+//
+// Estratta dall'inline di `setState` (impl.js); chi ne ha bisogno una seconda
+// volta (badge, T149) la richiama invece di riscrivere lo stesso `find`.
+export function projectByStateKey(loomRegistry, key) {
+    if (!key) return null;
+    return loomRegistry.find(p => p.id === key) ?? null;
 }
 
 // ── Preferenze di compass — schema GSettings (T164) ──────────────────────────
@@ -748,22 +749,15 @@ export function sessionHookState(session, channels) {
 // project-config-architecture: error > ask > done > running > idle (error in
 // testa: 🔴 è il più urgente).
 //
-// La popolazione ridotta sono le SESSIONI VIVE, non più uno slot per surface.
-// Prima la sorgente era `_sessions` keyed su profilo Ptyxis, e tutte le tab
-// claude di un progetto ne condividono uno solo: N sessioni entravano nel
-// rollup come un elemento, l'ultimo annuncio arrivato. Il canale vecchio resta
-// per le surface NON claude (il deck), che non compaiono nel registro dei
-// processi Claude; per claude è escluso di proposito, o lo stato appiccicato
-// al profilo da una sessione morta di `kill -9` (che non manda mai `end`)
-// continuerebbe a colorare il cappello per sempre.
-export function loomRollupState(project, sessions = [], channels) {
+// La popolazione ridotta sono le SESSIONI VIVE, non uno slot per surface. Il
+// canale di progetto (`channels.profiles`) non entra: tutte le tab claude di un
+// progetto ne condividono la chiave, quindi N sessioni vi pesano come un
+// elemento solo, l'ultimo annuncio arrivato — e lo stato lasciato lì da una
+// sessione morta di `kill -9` (che non manda mai `end`) colorerebbe il
+// cappello per sempre. Il deck, l'unica surface non claude, non annuncia stato.
+export function loomRollupState(sessions = [], channels) {
     const states = new Set();
     for (const s of sessions) states.add(sessionState(s, channels));
-    for (const [kind, uuid] of Object.entries(project.bindings ?? {})) {
-        if (kind === 'claude') continue;
-        const st = channels.profiles.get(uuid);
-        if (st) states.add(st.state);
-    }
     for (const s of ['error', 'ask', 'done', 'running'])
         if (states.has(s)) return s;
     return 'idle';

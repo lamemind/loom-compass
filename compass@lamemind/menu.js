@@ -827,10 +827,9 @@ export function fillLoomHeader(self, item, project, wins, sessions = []) {
 
     const findProjectWindow = projectWindowResolver(self, project);
 
-    // dot — STATO via rollup delle surface tracked (ask>done>running>idle),
-    // come le voci vecchie: STATE_EMOJI keyed su _sessions[bindingUUID]. Lo
-    // stato arriva via D-Bus (hook claude → SetState su PTYXIS_PROFILE, che è
-    // esattamente bindings.claude del cappello).
+    // dot — STATO via rollup delle sessioni vive (error>ask>done>running>idle,
+    // vedi Model.loomRollupState). Lo stato per-sessione arriva via D-Bus
+    // (hook claude → SetSessionState, keyed sul sessionId).
     //
     // FADE DI PRESENZA (stessa regola dei bottoni surface e del blocco vecchio):
     // il pallino segue lo stato aperto/chiuso del progetto. Nessuna finestra col
@@ -839,7 +838,7 @@ export function fillLoomHeader(self, item, project, wins, sessions = []) {
     // hover della riga — `item.hover` è true anche col puntatore sopra i bottoni
     // figli (niente flicker). Lo STATO (emoji del rollup) NON cambia: varia solo
     // l'alpha, a segnalare "progetto non presente".
-    const rollup = Model.loomRollupState(project, sessions, self._channels);
+    const rollup = Model.loomRollupState(sessions, self._channels);
     const dot = new St.Label({
         text: Model.STATE_EMOJI[rollup] ?? '⚪',
         style_class: 'compass-dot',
@@ -891,9 +890,10 @@ export function fillLoomHeader(self, item, project, wins, sessions = []) {
     // focussa la finestra esistente, questo chiama SEMPRE launchTracked → nuova
     // tab nella project-window (coalescing), o nuova finestra se nessuna. La
     // distinzione focus-or-launch / always-launch resta anche ora che l'icona è
-    // identitaria (🤖) e non più un modificatore (➕). Mostrato solo dove claude
-    // è abilitato E bound (serve un profilo UUID da lanciare).
-    if (project.surfaces.includes('claude') && project.bindings?.claude) {
+    // identitaria (🤖) e non più un modificatore (➕). Mostrato dove claude è
+    // abilitato: il lancio non chiede più un profilo Ptyxis, quindi nessun
+    // binding da verificare.
+    if (project.surfaces.includes('claude')) {
         const newClaudeBtn = new St.Button({
             style_class: 'compass-surface-btn',
             label: '🤖',

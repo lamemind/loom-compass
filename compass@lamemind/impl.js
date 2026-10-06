@@ -1,7 +1,8 @@
 // impl.js — compass@lamemind (Project Compass) — CODICE REALE (hot-reloadable)
 // Caricato da extension.js (stub) via dynamic import cache-busted a ogni enable().
 // NON esporta l'Extension: espone `CompassImpl {enable(ext), disable()}`.
-// GNOME Shell 45+ (ES modules). Chiave sessione v1 = PTYXIS_PROFILE.
+// GNOME Shell 45+ (ES modules). Chiave di progetto = PTYXIS_PROFILE, che porta
+// l'`id` del progetto (vedi Model.projectByStateKey).
 //
 // È la RADICE del grafo dei moduli: ciclo di vita e stato dell'istanza, canale
 // D-Bus in ingresso, badge/suono/notifica in uscita. I cinque fratelli non lo
@@ -167,7 +168,7 @@ class CompassIndicator extends PanelMenu.Button {
         // Le preferenze dell'estensione (Gio.Settings), di proprietà di
         // CompassImpl: l'indicatore le legge e ne ascolta i cambi, non le crea.
         this._settings  = settings;
-        this._sessions  = new Map(); // profileId → {state, seen}
+        this._sessions  = new Map(); // chiave di stato (id progetto) → {state, seen}
         this._sessionStates = new Map(); // sessionId → {state} — canale per-sessione (T119)
         // I due canali di stato in un oggetto solo, passato alle funzioni di
         // model.js. Alias dei campi sopra, costruito una volta: nessun rename,
@@ -287,14 +288,13 @@ class CompassIndicator extends PanelMenu.Button {
 
     // Concatenazione delle emoji dei progetti in attesa (D3), non un conteggio:
     // un `2` non dice quali due, e aprire il menu per saperlo è esattamente il
-    // click che il badge dovrebbe risparmiare. `Set` deduplica per progetto —
-    // due surface dello stesso cappello (`claude` e `deck`) in attesa insieme
-    // risolvono allo stesso `project.emoji` e contano una volta sola (T149).
+    // click che il badge dovrebbe risparmiare. `Set` deduplica per emoji: due
+    // progetti con la stessa emoji in attesa insieme contano una volta sola.
     _updateBadge() {
         const emojis = new Set();
         for (const [profileId, s] of this._sessions) {
             if (s.seen || (s.state !== 'ask' && s.state !== 'done')) continue;
-            const project = Model.projectByBinding(this._loomRegistry, profileId);
+            const project = Model.projectByStateKey(this._loomRegistry, profileId);
             if (project) emojis.add(project.emoji);
         }
         if (emojis.size > 0) {
@@ -355,7 +355,7 @@ class CompassIndicator extends PanelMenu.Button {
     _priorityMuted(profileId, sessionId, state) {
         if (!sessionId) return false;
         if (state !== 'done' && state !== 'ask') return false;
-        const project = Model.projectByBinding(this._loomRegistry, profileId);
+        const project = Model.projectByStateKey(this._loomRegistry, profileId);
         if (!project) return false;
         return Model.loadSessionMarks(project.dir).get(sessionId)?.priority === true;
     }
@@ -378,14 +378,14 @@ class CompassIndicator extends PanelMenu.Button {
     // ding sulla conversazione marcata, non zero.
     setState(profileId, state, muteSound = false) {
         const project = this._registry.find(p => p.profile === profileId);
-        // Il profilo è "conosciuto" se è nel registry vecchio (projects.json) OPPURE
-        // se è un binding di un cappello loom (dconf). Così lo stato via D-Bus popola
-        // _sessions anche per i progetti loom-only (non più in projects.json) → il
-        // loro pallino segue lo stato reale. _sessions resta keyed su profile UUID.
+        // La chiave è "conosciuta" se è il profilo UUID di un progetto del registry
+        // vecchio (projects.json) OPPURE l'`id` di un cappello loom (dconf). I due
+        // spazi non si toccano: un UUID Ptyxis non è mai un id di progetto.
+        // _sessions resta keyed sulla chiave così come arriva.
         // Il cappello loom si tiene come OGGETTO, non come bool: oltre a decidere se
-        // il profilo è conosciuto serve a notificare (displayName) e a risolvere la
+        // la chiave è conosciuta serve a notificare (displayName) e a risolvere la
         // finestra col matcher nuovo — vedi _showNotification.
-        const loomProject = Model.projectByBinding(this._loomRegistry, profileId);
+        const loomProject = Model.projectByStateKey(this._loomRegistry, profileId);
         if (!project && !loomProject) return; // sconosciuto a entrambi → ignora
 
         const prev      = this._sessions.get(profileId) ?? {state: 'idle', seen: true};

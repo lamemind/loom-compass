@@ -7,8 +7,9 @@
 # Utility dev:
 #   compass reload    ricarica l'estensione (disable/enable, niente relogin)
 #
-# Lo stato viaggia keyed su $PTYXIS_PROFILE: l'estensione mappa profilo → sessione
-# e ne deriva il pallino di stato del progetto (rollup ask > done > running > idle).
+# Lo stato viaggia keyed su $PTYXIS_PROFILE, che porta l'`id` del progetto (la
+# mette davanti a `claude` chi apre la tab): l'estensione mappa chiave → progetto
+# per badge, suono e notifica; il pallino viene dal canale per-sessione.
 # Senza PTYXIS_PROFILE non c'è nulla da annunciare → exit silenzioso, così l'hook
 # non rompe le sessioni lanciate fuori da Ptyxis.
 #

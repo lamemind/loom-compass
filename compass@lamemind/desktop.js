@@ -176,16 +176,16 @@ export function projectForTitle(title, loomRegistry) {
 //
 // FALLBACK A `terminal` — il default in assenza di configurazione, e la rete di
 // sicurezza quando la surface richiesta non è lanciabile qui (disabilitata in
-// `surfaces`, o claude senza binding UUID). Motivo: `terminal` è l'unica surface
-// built-in universale, senza gate di enablement e senza binding → è l'unica che
-// non può a sua volta risolvere nel vuoto. Così il bottone-nome non è MAI inerte.
+// `surfaces`). Motivo: `terminal` è l'unica surface built-in universale, senza
+// gate di enablement → è l'unica che non può a sua volta risolvere nel vuoto.
+// Così il bottone-nome non è MAI inerte.
 //
 // La coerenza `defaultSurface` ↔ `surfaces` non è imposta a monte (cfg_validate
 // rifiuta solo i valori fuori enum): disabilitare una surface è un'operazione
 // legittima e non deve invalidare l'intera config del progetto. Qui degrada.
 export function resolveDefaultSurface(project) {
     const want = project.defaultSurface;
-    if (want === 'claude' && project.surfaces.includes('claude') && project.bindings?.claude)
+    if (want === 'claude' && project.surfaces.includes('claude'))
         return 'claude';
     if (want === 'deck' && project.surfaces.includes('deck'))
         return 'deck'; // deck globale (T25): nessun binding richiesto
@@ -211,10 +211,6 @@ export function resolveDefaultSurface(project) {
 // la ripresa di una conversazione, che ha lo stesso identico bisogno.
 export function launchTracked(project, kind, ts, findProjectWindow) {
     try {
-        const uuid = project.bindings?.[kind];
-        // deck (comando globale) e terminal (nessun comando: È la shell) si
-        // lanciano senza profilo. claude: serve il binding.
-        if (kind !== 'deck' && kind !== 'terminal' && !uuid) return;
         const dir = projectDir(project);
 
         const spawnTab = (newWindow) => {
@@ -258,23 +254,23 @@ export function launchTracked(project, kind, ts, findProjectWindow) {
                 //  - il TITOLO `<emoji> <name>`: `-T` vale per l'istante prima
                 //    che claude parta, poi lo tiene `claude --name`, che è il
                 //    canale autoritativo e lo riscrive a ogni turno;
-                //  - la CHIAVE DI STATO, `PTYXIS_PROFILE=<chiave>` davanti a
-                //    claude. Ptyxis esporta da sé PTYXIS_PROFILE in ogni tab, ma
-                //    col valore del profilo di default: senza il prefisso la
-                //    sessione annuncerebbe una chiave che nessun progetto
-                //    dichiara, e il badge resterebbe fermo senza errori.
+                //  - la CHIAVE DI STATO, `PTYXIS_PROFILE=<id del progetto>`
+                //    davanti a claude: è ciò che `Model.projectByStateKey`
+                //    risolve, e il nome della variabile è solo storico. Ptyxis
+                //    esporta da sé PTYXIS_PROFILE in ogni tab, ma col valore del
+                //    profilo di default: senza il prefisso la sessione
+                //    annuncerebbe una chiave che nessun progetto dichiara, e il
+                //    badge resterebbe fermo senza errori.
                 // Titolo e chiave entrano come `$1`/`$2` di `bash -lc`, non
                 // interpolati nella riga: arrivano dal registry, e un valore
                 // passato come argomento non ha quoting da sbagliare.
                 // `exec bash` tiene viva la tab all'uscita di claude, come il
                 // custom-command del vecchio profilo.
                 const title = project.label;
-                const inner = uuid
-                    ? 'PTYXIS_PROFILE="$2" claude --name "$1"; exec bash'
-                    : 'claude --name "$1"; exec bash';
+                const inner = 'PTYXIS_PROFILE="$2" claude --name "$1"; exec bash';
                 argv = newWindow
-                    ? ['ptyxis', '--new-window', '-d', dir, '-T', title, '--', 'bash', '-lc', inner, 'bash', title, uuid]
-                    : ['ptyxis', '--tab',        '-d', dir, '-T', title, '--', 'bash', '-lc', inner, 'bash', title, uuid];
+                    ? ['ptyxis', '--new-window', '-d', dir, '-T', title, '--', 'bash', '-lc', inner, 'bash', title, project.id]
+                    : ['ptyxis', '--tab',        '-d', dir, '-T', title, '--', 'bash', '-lc', inner, 'bash', title, project.id];
             }
             try {
                 Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE);

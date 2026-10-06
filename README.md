@@ -59,7 +59,12 @@ Il pallino si popola dagli hook di Claude Code (`~/.claude/settings.json`), che 
 
 Lo stato è **keyed su `$PTYXIS_PROFILE`**, non sul titolo della finestra: il
 titolo è posseduto da `claude --name`, quindi non può portare anche lo stato →
-serve un canale separato. Fuori da Ptyxis la variabile non esiste e l'hook esce silenzioso, senza rompere la sessione.
+serve un canale separato. La variabile porta l'`id` del progetto, non l'UUID di
+un profilo Ptyxis: la mette davanti a `claude` chi apre la tab (il bottone 🤖 di
+compass, `deck-run` lato deck). Una sessione aperta a mano in una tab qualunque
+annuncia l'UUID del profilo di default, che nessun progetto dichiara: niente
+badge né suono, ma la sua riga nel menu resta. Fuori da Ptyxis la variabile non
+esiste e l'hook esce silenzioso, senza rompere la sessione.
 
 ## Impostazioni
 
