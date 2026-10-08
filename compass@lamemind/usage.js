@@ -68,8 +68,7 @@ export function levelOf(pct, remainingSeconds, windowSeconds) {
 // foglio di stile resta in cache nel loader anche dopo `compass reload` e
 // richiederebbe un relogin a ogni ritocco di colore, mentre `impl.js` e i suoi
 // fratelli si ricaricano a caldo.
-const KEY_STYLE = 'font-size: 0.85em; color: rgba(255,255,255,0.45); ' +
-                  'margin-left: 8px; margin-right: 4px;';
+const SEPARATOR_STYLE = 'font-size: 0.85em; color: rgba(255,255,255,0.45);';
 
 function valueStyle(level) {
     const {color, weight} = LEVELS[level];
@@ -86,12 +85,14 @@ const UNKNOWN_TEXT = '--';
 
 // ── Widget ───────────────────────────────────────────────────────────────────
 
-// Costruisce il gruppo `5h <pct>  7d <pct>` e restituisce la maniglia per
-// aggiornarlo. Etichetta e valore sono due label distinte per poterle colorare
-// in modo indipendente: l'etichetta resta un'ancora fissa e spenta, l'enfasi sta
-// tutta sulla cifra.
+// Costruisce il gruppo `<pct sessione> / <pct settimana>` e restituisce la
+// maniglia per aggiornarlo. Niente etichette: la posizione dice la finestra, la
+// sessione da 5 ore a sinistra e la settimana a destra. Le due cifre e il
+// separatore sono label distinte per poterle colorare in modo indipendente: il
+// separatore resta un'ancora fissa e spenta, l'enfasi sta tutta sulla cifra.
 export function buildUsage() {
     const box = new St.BoxLayout({
+        style:    'margin-left: 8px;',
         y_expand: true,
         y_align:  Clutter.ActorAlign.CENTER,
     });
@@ -103,14 +104,12 @@ export function buildUsage() {
         y_align:  Clutter.ActorAlign.CENTER,
     });
 
-    const fiveKey    = mkLabel('5h', KEY_STYLE);
     const fiveValue  = mkLabel(UNKNOWN_TEXT, valueStyle(0));
-    const sevenKey   = mkLabel('7d', KEY_STYLE);
+    const separator  = mkLabel(' / ', SEPARATOR_STYLE);
     const sevenValue = mkLabel(UNKNOWN_TEXT, valueStyle(0));
 
-    box.add_child(fiveKey);
     box.add_child(fiveValue);
-    box.add_child(sevenKey);
+    box.add_child(separator);
     box.add_child(sevenValue);
 
     // Ogni finestra arriva come {pct, resetsAt} — `resetsAt` in secondi unix.
