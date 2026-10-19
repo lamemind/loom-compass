@@ -1,8 +1,9 @@
 // desktop.js — compass@lamemind — LE FINESTRE E I PROCESSI
 //
-// Match titolo → progetto, focus cross-desktop, coalescing delle tab, spawn
-// delle surface, suono. È l'unico file dell'estensione che sa che esiste un
-// window manager, ed è per questo l'unico non portabile.
+// Match titolo → progetto, focus cross-desktop, salto alla tab di una
+// conversazione, coalescing delle tab, spawn delle surface, suono. È l'unico
+// file dell'estensione che sa che esiste un window manager, ed è per questo
+// l'unico non portabile.
 //
 // Match e lancio stanno insieme perché sono i due pezzi della stessa colla:
 // compass può fare focus-then-tab solo perché possiede già la mappa
@@ -58,6 +59,113 @@ export function getPtyxisWindows() {
         const cls = w.get_wm_class() ?? '';
         return cls.toLowerCase().includes('ptyxis');
     });
+}
+
+// ── La tab di una conversazione ──────────────────────────────────────────────
+//
+// Trascritto da coda@lamemind (progetto factory), dove è collaudato nella
+// sessione reale. La mappatura conversazione → tab passa dal titolo della tab,
+// che è il `--name` passato a `claude`; il cambio di tab passa da AT-SPI, nel
+// processo a sé `ptyxis-tab.js` (contratto e misure nella sua testata).
+
+// L'helper si LANCIA, non si importa: è un processo `gjs -m` a sé. Il path si
+// risolve da `import.meta.url` senza la query di cache-busting, che in un path
+// di file non vuol dire niente.
+const TAB_HELPER = GLib.build_filenamev([
+    GLib.path_get_dirname(GLib.filename_from_uri(import.meta.url.split('?')[0])[0]),
+    'ptyxis-tab.js',
+]);
+const TAB_HELPER_TIMEOUT_S = 3;
+const TAB_OUTCOMES = ['esatta', 'tab', 'ambigua', 'assente', 'fallita'];
+const TITLE_RETRY_MS    = 50;
+const TITLE_RETRY_TIMES = 10;
+
+// Porta davanti la tab della conversazione nella sua finestra, senza toccare
+// il focus. L'helper è un processo a sé perché le chiamate di accessibilità
+// sono D-Bus sincrone e qui fermerebbero il compositore; un helper che non
+// risponde in `TAB_HELPER_TIMEOUT_S` si uccide.
+//
+// → Promise di {outcome, title}: `outcome` è un esito dell'helper oppure
+// `errore`; `title` è il titolo della finestra da portare davanti, o null.
+// `extraStep` è l'opzione di collaudo dell'oracolo (`--salto-in-piu`).
+//
+// Senza nomi l'helper non parte: uscirebbe 2 (uso) e l'esito sarebbe `errore`,
+// cioè «l'helper non ha risposto» per una conversazione che non ha un titolo da
+// cercare. Nessuna tab porta un nome vuoto: è `assente`.
+export function switchPtyxisTab(names, {extraStep = false} = {}) {
+    if (names.length === 0) return Promise.resolve({outcome: 'assente', title: null});
+    return new Promise(resolve => {
+        const argv = ['gjs', '-m', TAB_HELPER, ...(extraStep ? ['--salto-in-piu'] : []), ...names];
+        let proc;
+        try {
+            proc = Gio.Subprocess.new(argv,
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+        } catch (e) {
+            logError(e, '[Compass] helper tab: avvio');
+            resolve({outcome: 'errore', title: null});
+            return;
+        }
+        let timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, TAB_HELPER_TIMEOUT_S, () => {
+            timeoutId = 0;
+            proc.force_exit();
+            return GLib.SOURCE_REMOVE;
+        });
+        proc.communicate_utf8_async(null, null, (p, res) => {
+            if (timeoutId) GLib.source_remove(timeoutId);
+            try {
+                const [, stdout, stderr] = p.communicate_utf8_finish(res);
+                const [outcome, title] = (stdout ?? '').split('\n').map(l => l.trim());
+                if (p.get_successful() && TAB_OUTCOMES.includes(outcome)) {
+                    resolve({outcome, title: title || null});
+                    return;
+                }
+                // stderr porta sempre gli avvisi di libatspi sul socket: conta
+                // l'ultima riga, quella dell'helper.
+                const status = p.get_if_exited() ? `exit ${p.get_exit_status()}` : 'ucciso';
+                const last = (stderr ?? '').trim().split('\n').pop();
+                log(`[Compass] helper tab: ${status} stdout=«${(stdout ?? '').trim()}» ${last}`);
+            } catch (e) {
+                logError(e, '[Compass] helper tab');
+            }
+            resolve({outcome: 'errore', title: null});
+        });
+    });
+}
+
+// La finestra Ptyxis col titolo dato. Dopo un cambio di tab il titolo nuovo
+// arriva a Mutter dal client Wayland, e può arrivare dopo l'uscita
+// dell'helper: si riprova per mezzo secondo prima di dire che non c'è.
+export async function windowWithTitle(title) {
+    for (let i = 0; i <= TITLE_RETRY_TIMES; i++) {
+        const win = getPtyxisWindows().find(w => (w.get_title() ?? '').trim() === title);
+        if (win) return win;
+        await new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, TITLE_RETRY_MS, () => {
+            resolve();
+            return GLib.SOURCE_REMOVE;
+        }));
+    }
+    return null;
+}
+
+// La finestra più vicina alla conversazione, in due passi. È il ripiego di
+// quando l'helper non dice quale finestra tiene la tab.
+//
+//  1. Una finestra il cui titolo È uno dei nomi della conversazione: il titolo
+//     di Ptyxis segue la tab attiva, quindi quella finestra ha la conversazione
+//     già davanti. `names` porta il nome effettivo del registro e quello
+//     chiesto con `--name` (`Model.procRequestedName`), perché il CLI rinomina
+//     una sessione in collisione ma il titolo della tab resta quello chiesto.
+//  2. Altrimenti la finestra del progetto, la stessa del bottone-nome: la
+//     conversazione è una tab là dentro, ma non quella davanti.
+//
+// `null` quando non c'è né l'una né l'altra (worktree lane, claude lanciato
+// fuori da Ptyxis, progetto ignoto).
+export function windowForSession(names, project, loomRegistry) {
+    const wins  = getPtyxisWindows();
+    const exact = wins.find(w => names.includes((w.get_title() ?? '').trim()));
+    if (exact) return exact;
+    if (!project) return null;
+    return resolveLoomWindows(loomRegistry, wins).get(project.id)?.win ?? null;
 }
 
 // Risoluzione finestra a livello PROGETTO (T34). Fix del sintomo "focus sulla
