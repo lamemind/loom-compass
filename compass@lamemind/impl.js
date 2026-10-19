@@ -133,6 +133,14 @@ const DBUS_INTERFACE_XML = `
     <method name="Ping">
       <arg type="b" name="result" direction="out"/>
     </method>
+    <!-- Porta davanti la tab della conversazione e risponde con l'esito
+         (esatta, tab, ambigua, assente, fallita, errore, nessuna, sconosciuta).
+         Lo chiama il deck, che su Wayland non può portare davanti un'altra
+         finestra: compass gira dentro Mutter e sì. -->
+    <method name="FocusSession">
+      <arg type="s" name="session_id" direction="in"/>
+      <arg type="s" name="esito"      direction="out"/>
+    </method>
   </interface>
 </node>`;
 
@@ -163,6 +171,21 @@ class CompassService {
 
     Ping() {
         return new GLib.Variant('(b)', [true]);
+    }
+
+    // Risponde DOPO il salto (~0,3 s): GJS manda la risposta al bus quando la
+    // Promise ritornata risolve, e un errore D-Bus se rigetta. Il rigetto qui
+    // non arriva: un'eccezione si logga e diventa l'esito `errore`, così il
+    // chiamante legge sempre una parola dello stesso vocabolario.
+    async FocusSession(sessionId) {
+        let outcome;
+        try {
+            outcome = await this._indicator.focusSession(sessionId, 'dbus');
+        } catch (e) {
+            logError(e, '[Compass] FocusSession');
+            outcome = 'errore';
+        }
+        return new GLib.Variant('(s)', [outcome]);
     }
 }
 

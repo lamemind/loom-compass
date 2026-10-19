@@ -26,6 +26,7 @@ Il cappello mostra **un solo** pallino, per **rollup** degli stati figli con pri
 | `compass@lamemind/extension.js` | **stub-loader** sottile: re-importa `impl.js` con cache-busting a ogni `enable()` |
 | `compass@lamemind/impl.js` | la logica vera (indicatore, menu, D-Bus, registry) |
 | `compass@lamemind/prefs.js` | la finestra delle impostazioni (GTK4/libadwaita, gira fuori dallo shell) |
+| `compass@lamemind/ptyxis-tab.js` | helper di accessibilità (AT-SPI): porta davanti la tab di una conversazione, in un processo `gjs` a sé |
 | `compass@lamemind/schemas/` | schema GSettings dell'estensione + il suo compilato |
 | `bin/compass` | bridge CLI: hook di stato Claude → D-Bus + `reload` |
 
@@ -65,6 +66,30 @@ compass, `deck-run` lato deck). Una sessione aperta a mano in una tab qualunque
 annuncia l'UUID del profilo di default, che nessun progetto dichiara: niente
 badge né suono, ma la sua riga nel menu resta. Fuori da Ptyxis la variabile non
 esiste e l'hook esce silenzioso, senza rompere la sessione.
+
+## Focus di una conversazione
+
+Il clic sul titolo di una conversazione viva nel menu (riga sotto il cappello o pinnata) porta davanti la **sua tab** Ptyxis, nella sua finestra, e poi la finestra. Lo stesso fa «Vai» sulla notifica «chiede conferma». La tab si trova dal titolo, che è il `--name` passato a `claude`; il cambio di tab passa dal bus di accessibilità (AT-SPI, pacchetto `at-spi2-core`), in un processo `gjs` a sé (`ptyxis-tab.js`): le chiamate AT-SPI sono sincrone, e dentro lo shell fermerebbero il desktop.
+
+Da fuori lo stesso focus si chiede via D-Bus, e la risposta è l'esito — è il canale del deck, che su Wayland non può portare davanti un'altra finestra:
+
+```bash
+gdbus call --session --dest org.lamemind.Compass --object-path /org/lamemind/Compass \
+  --method org.lamemind.Compass.FocusSession <sessionId>
+```
+
+| Esito | Significato |
+| --- | --- |
+| `esatta` | la tab era già davanti |
+| `tab` | tab cambiata |
+| `ambigua` | più tab con lo stesso nome: resta sulla finestra, nessun salto |
+| `assente` | nessuna tab con quel nome: finestra del progetto |
+| `fallita` | il salto non è arrivato alla tab |
+| `errore` | l'helper di accessibilità non ha risposto |
+| `nessuna` | nessuna finestra da mostrare |
+| `sconosciuta` | il `sessionId` non è nel registro dei processi vivi |
+
+Ogni focus scrive una riga `[Compass] focus <esito> <origine>` nel journal dello shell, con origine fra `riga`, `pinnata`, `vai`, `dbus`, `collaudo`. Gli esiti fuori dalla tab arrivano anche come banner, tranne su `FocusSession`: lì l'esito è nella risposta.
 
 ## Impostazioni
 
