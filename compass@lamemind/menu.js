@@ -636,35 +636,8 @@ export function pinnedRow(self, project, entry) {
         // niente da cliccare due volte.
         row.add_child(label);
     } else {
-        // L'etichetta dentro un BOTTONE: un `St.Button` reattivo figlio di una
-        // riga `reactive: false` riceve il click — la non-reattività del padre
-        // toglie dal pick il solo padre, non il sottoalbero (misurato per i
-        // toggle di T158).
-        //
-        // La label va in una `St.BoxLayout` dentro il bottone, non come figlia
-        // diretta: `St.Button` è un `St.Bin` e CENTRA il proprio figlio quando
-        // ha spazio extra, ignorando l'allineamento chiesto — il titolo
-        // finirebbe in mezzo alla riga. Una box invece rispetta l'espansione,
-        // quindi la label riempie da sinistra e si ellipsizza sulla larghezza
-        // vera.
-        const box = new St.BoxLayout({x_expand: true, x_align: Clutter.ActorAlign.FILL});
-        box.add_child(label);
-        const openBtn = new St.Button({
-            style_class: 'compass-surface-btn',
-            // Il padding della classe è tarato sui bottoni del cappello: su una
-            // riga di conversazione sfonderebbe l'altezza. Lo stile inline
-            // batte quello della classe sulla sola proprietà che nomina,
-            // quindi l'evidenziazione su hover resta — ed è quella, non
-            // un'opacità, a dire che la riga è azionabile.
-            style: 'padding: 1px 4px;',
-            child: box,
-            x_expand: true,
-            can_focus: true, track_hover: true,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-
         const findProjectWindow = projectWindowResolver(self, project);
-        openBtn.connect('clicked', () => {
+        row.add_child(labelButton(label, () => {
             // Il ts del click va catturato PRIMA di chiudere il menu: la
             // chiusura rilascia il grab e rifocussa la finestra pre-menu, e
             // senza il timestamp di un evento valido Mutter ignora l'activate
@@ -685,8 +658,7 @@ export function pinnedRow(self, project, entry) {
                 ts,
                 findProjectWindow
             );
-        });
-        row.add_child(openBtn);
+        }));
     }
 
     // Il toggle chiede la `dir` del progetto (dove sta il sidecar): senza, la
@@ -700,21 +672,58 @@ export function pinnedRow(self, project, entry) {
     return item;
 }
 
+// L'etichetta di una riga di conversazione come BOTTONE: clic sul titolo = vai a
+// quella conversazione. È la forma dell'azione principale nelle righe-sessione e
+// nelle pinnate; i toggle 🚨 📌 sono l'altra forma, il glifo (markToggle).
+//
+// Un `St.Button` reattivo figlio di una riga `reactive: false` riceve il click —
+// la non-reattività del padre toglie dal pick il solo padre, non il sottoalbero
+// (misurato per i toggle di T158).
+//
+// La label va in una `St.BoxLayout` dentro il bottone, non come figlia diretta:
+// `St.Button` è un `St.Bin` e CENTRA il proprio figlio quando ha spazio extra,
+// ignorando l'allineamento chiesto — il titolo finirebbe in mezzo alla riga. Una
+// box invece rispetta l'espansione, quindi la label riempie da sinistra e si
+// ellipsizza sulla larghezza vera.
+//
+// Il bottone espande, e con questo fa anche il mestiere dello spacer: prendendosi
+// lo spazio in mezzo, spinge a destra ciò che la riga aggiunge dopo.
+function labelButton(label, onClick) {
+    const box = new St.BoxLayout({x_expand: true, x_align: Clutter.ActorAlign.FILL});
+    box.add_child(label);
+    const btn = new St.Button({
+        style_class: 'compass-surface-btn',
+        // Il padding della classe è tarato sui bottoni del cappello: su una riga
+        // di conversazione sfonderebbe l'altezza. Lo stile inline batte quello
+        // della classe sulla sola proprietà che nomina, quindi l'evidenziazione
+        // su hover resta — ed è quella, non un'opacità, a dire che la riga è
+        // azionabile.
+        style: 'padding: 1px 4px;',
+        child: box,
+        x_expand: true,
+        can_focus: true, track_hover: true,
+        y_align: Clutter.ActorAlign.CENTER,
+    });
+    btn.connect('clicked', onClick);
+    return btn;
+}
+
 // Riga-sessione, a due ancoraggi: `glifo titolo` a sinistra, `età toggle` a
 // destra. Come la riga del cappello, il contenuto sta in una St.BoxLayout propria
 // e non in figli diretti dell'item — la PopupBaseMenuItem centra i figli diretti
 // e non rispetta la loro richiesta di espansione, quindi senza il contenitore il
 // blocco destro non arriverebbe a destra.
 //
-// La riga resta INERTE per decisione (D2): il focus è già mestiere del
-// bottone-nome del cappello, e la mappatura conversazione → tab Ptyxis non è
-// ottenibile da nessuna fonte disponibile — il registro non la porta e Ptyxis non
-// espone targeting per-finestra. Una riga che al click focussa la finestra
-// duplicherebbe il bottone-nome su N righe.
+// Il clic sul titolo porta davanti la tab di QUESTA conversazione, nella sua
+// finestra. La mappatura conversazione → tab passa dal titolo della tab, che è
+// il `--name` passato a `claude`; il cambio di tab passa da AT-SPI, nel processo
+// a sé `ptyxis-tab.js` (vedi `Desktop.switchPtyxisTab`). La riga non duplica il
+// bottone-nome del cappello: quello porta alla finestra del progetto, questa
+// alla tab della conversazione — due bersagli diversi.
 //
-// Quella decisione copre il focus, non ogni interazione: un toggle ha bisogno del
-// solo `sessionId`, che la riga possiede già. La forma che rispetta entrambe le
-// cose è un BOTTONE dentro la riga, non la riga resa reattiva — vedi markToggle.
+// Età e toggle stanno fuori dal bottone del titolo, e la riga resta inerte: ogni
+// azione è un BOTTONE dentro la riga, non la riga resa reattiva — vedi
+// labelButton e markToggle.
 export function sessionRow(self, session, project, marks) {
     const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false});
     hideOrnament(item);
@@ -728,21 +737,18 @@ export function sessionRow(self, session, project, marks) {
     const state = Model.sessionState(session, self._channels);
     const glyph = Model.STATE_EMOJI[state] ?? '⚪';
 
-    // L'etichetta ESPANDE e si ellipsizza da sé, e con questo fa anche il mestiere
-    // dello spacer che stava qui: prendendosi lo spazio in mezzo, spinge età e
-    // toggle a destra senza un attore vuoto che li separi.
-    //
-    // Il taglio passa così a Pango, che lo decide sulla larghezza REALE della
-    // riga. Prima lo decideva un cap di venti code unit, quindi tagliava anche
-    // quando il popup aveva spazio, e tagliava di più sui titoli con emoji —
-    // che è il caso normale, dato che ogni titolo di tab ne porta almeno una.
+    // L'etichetta ESPANDE dentro il suo bottone e si ellipsizza da sé: il taglio
+    // lo decide Pango sulla larghezza REALE della riga. Prima lo decideva un cap
+    // di venti code unit, quindi tagliava anche quando il popup aveva spazio, e
+    // tagliava di più sui titoli con emoji — che è il caso normale, dato che ogni
+    // titolo di tab ne porta almeno una.
     const label = new St.Label({
         text: `${glyph}  ${sessionLabel(session, project)}`,
         y_align: Clutter.ActorAlign.CENTER,
         x_expand: true,
     });
     label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-    row.add_child(label);
+    row.add_child(labelButton(label, () => self._focus(session, project, 'riga')));
 
     if (AGED_STATES.has(state))
         row.add_child(new St.Label({
@@ -770,8 +776,8 @@ export function sessionRow(self, session, project, marks) {
 // Misurato, non dedotto: un `St.Button` reattivo figlio di una riga
 // `reactive: false` RICEVE il click. La non-reattività del padre toglie dal pick
 // il solo padre, non il sottoalbero — quindi non serve rendere reattiva la riga
-// con l'attivazione neutralizzata, e non si rimette in piedi l'aspettativa di
-// focus che la riga inerte esiste per non creare.
+// con l'attivazione neutralizzata: ogni azione della riga è un bottone suo, e il
+// clic su un toggle non porta a nessuna tab.
 //
 // Lo stato acceso/spento è l'OPACITÀ, sulla scala già in uso nel resto del menu:
 // 255 = marca accesa, 110 = spenta ma azionabile, con ripristino su hover.
