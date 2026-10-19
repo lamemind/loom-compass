@@ -592,18 +592,13 @@ export function pinnedLabel(sessionId, mark) {
  * e un secondo fader in serie (110/255 ≈ 0.43) le porta a un terzo
  * dell'opacità piena — testo che non si legge, invece di testo attenuato.
  *
- * CLICCABILE SOLO SE NON È VIVA. Una riga viva è inerte per la stessa
- * decisione che tiene inerti le righe-sessione del cappello: la tab esatta non
- * è raggiungibile (Ptyxis non espone targeting per-tab), quindi l'unica azione
- * possibile sarebbe focussare la finestra del progetto — che è già il mestiere
- * del bottone-nome, e offrirla su N righe la duplica. Sulla morta invece il
- * click ha un'azione sua, che nessun altro bottone del menu fa: riaprire
- * QUELLA conversazione.
+ * Il clic sul titolo va a QUELLA conversazione, con due azioni secondo il
+ * glifo: una viva porta davanti la sua tab, come la riga-sessione; una morta si
+ * riprende in una tab nuova della finestra del progetto (`Desktop.launchResume`).
  *
- * Il rischio che questo chiude non è estetico: una conversazione viva la cui
- * riga si lascia cliccare può finire ripresa una seconda volta, e due processi
- * `claude` che scrivono lo stesso transcript sono due scrittori sullo stesso
- * file.
+ * Una viva non si riprende mai, e il rischio che questo chiude non è estetico:
+ * una conversazione viva ripresa una seconda volta sono due processi `claude`
+ * che scrivono lo stesso transcript, due scrittori sullo stesso file.
  *
  * Il toggle è 📌 e non 🚨: spinnare è l'unica azione che ha senso su una riga
  * che potrebbe essere morta, e senza il toggle qui l'unico modo di spinnare una
@@ -632,9 +627,8 @@ export function pinnedRow(self, project, entry) {
     label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
 
     if (session) {
-        // Viva → etichetta nuda, nessun bottone: niente da cliccare, quindi
-        // niente da cliccare due volte.
-        row.add_child(label);
+        // Viva → la sua tab davanti, come il clic sulla riga-sessione.
+        row.add_child(labelButton(label, () => self._focus(session, project, 'pinnata')));
     } else {
         const findProjectWindow = projectWindowResolver(self, project);
         row.add_child(labelButton(label, () => {
