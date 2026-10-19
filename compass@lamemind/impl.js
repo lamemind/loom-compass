@@ -5,14 +5,15 @@
 // l'`id` del progetto (vedi Model.projectByStateKey).
 //
 // È la RADICE del grafo dei moduli: ciclo di vita e stato dell'istanza, canale
-// D-Bus in ingresso, badge/suono/notifica in uscita. I cinque fratelli non lo
-// importano mai — la dipendenza va in un verso solo:
+// D-Bus in ingresso, badge/suono/notifica in uscita, focus di una conversazione.
+// I cinque fratelli non lo importano mai — la dipendenza va in un verso solo:
 //
 //     impl.js  →  {menu.js, dialog.js}  →  {model.js, desktop.js}
 //     impl.js  →  usage.js
 //
 //   model.js    il dato: registri, registro dei processi vivi, stato, rollup
-//   desktop.js  le finestre e i processi: match, focus, coalescing, spawn, suono
+//   desktop.js  le finestre e i processi: match, focus, salto di tab,
+//               coalescing, spawn, suono
 //   menu.js     i widget del popup: voce di menu, righe-sessione, bottoni surface
 //   dialog.js   il modale sulla conversazione in focus, e la sua risoluzione
 //   usage.js    il consumo dell'account in top bar: livelli, widget, mock
@@ -20,6 +21,8 @@
 // `prefs.js` (la finestra delle impostazioni) NON è nel grafo: la carica un
 // altro processo, il servizio `org.gnome.Shell.Extensions`, e importa il solo
 // model.js. Con lo shell parla attraverso lo schema GSettings, non per import.
+// Fuori dal grafo anche `ptyxis-tab.js`: è un processo `gjs` a sé, che
+// desktop.js lancia e non importa.
 //
 // Qui resta ciò che non può uscire: dove lo stato dell'istanza vive e dove i
 // moduli vengono cablati fra loro.
@@ -88,6 +91,20 @@ const KEYBINDING_OPEN_DIALOG = 'open-session-dialog';
 // La costante vive in model.js: la legge anche prefs.js, che gira in un altro
 // processo e non può importare questo file.
 const SETTINGS_SCHEMA_ID = Model.SETTINGS_SCHEMA_ID;
+
+// ── Esiti del focus che non portano alla tab ─────────────────────────────────
+//
+// Testi di coda@lamemind, da cui il focus della tab è trascritto. `tab` ed
+// `esatta` non hanno testo: arrivano solo nel journal. Gli altri arrivano anche
+// a schermo, perché chi resta sulla tab sbagliata senza saperlo non rilegge il
+// journal.
+const FOCUS_NOTICE = {
+    ambigua: name => `Più tab si chiamano «${name}»: resto sulla finestra, la tab scegli tu`,
+    assente: name => `Nessuna tab si chiama «${name}»: mostro la finestra del progetto`,
+    fallita: name => `Il salto alla tab «${name}» non è arrivato`,
+    errore:  name => `Tab di «${name}» non raggiungibile: l'helper di accessibilità non ha risposto`,
+    nessuna: name => `Nessuna finestra Ptyxis per «${name}»`,
+};
 
 // ── D-Bus interface ──────────────────────────────────────────────────────────
 
@@ -192,6 +209,10 @@ class CompassIndicator extends PanelMenu.Button {
         // deve sopravvivere a una ricostruzione non può vivere in un attore.
         this._openSub            = null;
         this._notificationSource = null;
+        // Falso da `destroy()` in poi: un focus che aspetta l'helper della tab
+        // (~0,3 s) può risvegliarsi dopo un disable, e non deve toccare un
+        // indicatore distrutto.
+        this._alive              = true;
 
         // ── Layout top-bar: [icona] [badge] [consumo account] ───────────────
         //
@@ -447,22 +468,30 @@ class CompassIndicator extends PanelMenu.Button {
         return this._notificationSource;
     }
 
-    _showNotification(project, loomProject) {
-        const source      = this._getOrCreateSource();
-        const displayName = loomProject?.label ?? project.display ?? project.label;
-
+    // Una notifica della sorgente di compass, non ancora consegnata: chi la
+    // chiede può aggiungerle un'azione prima di `addNotification`.
+    //
+    // `transient` = sparisce dal centro notifiche dopo il banner. Lo vuole un
+    // avviso che riguarda un clic appena fatto; non lo vuole «chiede
+    // conferma», che porta un «Vai» da usare anche minuti dopo.
+    _newNotification(title, body, transient = false) {
+        const source = this._getOrCreateSource();
         let notification;
         try {
             // GNOME 45+ object-init API
-            notification = new MessageTray.Notification({
-                source,
-                title: displayName,
-                body:  'chiede conferma',
-            });
+            notification = new MessageTray.Notification({source, title, body, isTransient: transient});
         } catch (_e) {
             // Fallback GNOME 44 string API
-            notification = new MessageTray.Notification(source, displayName, 'chiede conferma');
+            notification = new MessageTray.Notification(source, title, body);
+            notification.setTransient?.(transient);
         }
+        return notification;
+    }
+
+    _showNotification(project, loomProject) {
+        const source       = this._getOrCreateSource();
+        const displayName  = loomProject?.label ?? project.display ?? project.label;
+        const notification = this._newNotification(displayName, 'chiede conferma');
 
         try {
             notification.addAction('Vai', () => {
@@ -484,6 +513,73 @@ class CompassIndicator extends PanelMenu.Button {
         } catch (_e) {}
 
         source.addNotification(notification);
+    }
+
+    // ── Focus di una conversazione (T183) ────────────────────────────────────
+
+    // Porta davanti la tab della conversazione, poi la sua finestra. Trascritto
+    // da coda@lamemind, dove è collaudato nella sessione reale.
+    //
+    // Prima la tab, poi la finestra: l'helper cambia tab dove la trova, in
+    // qualunque finestra, e dice quale finestra la tiene; compass porta davanti
+    // quella. Senza la finestra dall'helper si ripiega su
+    // `Desktop.windowForSession`: la finestra che ha già la conversazione
+    // davanti, o quella del progetto, come il bottone-nome.
+    //
+    // `convo` = `{name, pid}` come li porta il registro vivo; `project` = il
+    // cappello del ripiego, o null. `origin` = l'ingresso che chiede il focus
+    // (`riga`, `pinnata`, `vai`, `dbus`, `collaudo`).
+    //
+    // Una riga di journal per focus, `[Compass] focus <esito> <origine>`:
+    // l'esito dell'helper, `errore` se l'helper non ha risposto, `nessuna` se
+    // non c'è nessuna finestra da mostrare. L'origine attribuisce un esito al
+    // suo ingresso, e le righe del collaudo si escludono per parola. Tutto ciò
+    // che non è `tab` o `esatta` arriva anche a schermo (`FOCUS_NOTICE`), tranne
+    // su `dbus`: lì l'esito viaggia nella risposta e lo mostra il chiamante, e
+    // un banner di compass sarebbe lo stesso avviso due volte.
+    //
+    // `extraStep` è l'opzione di collaudo dell'oracolo, vedi `collaudoProbe`.
+    _focus(convo, project, origin, opts = {}) {
+        this._focusTab(convo, project, origin, opts).catch(e => logError(e, '[Compass] focus'));
+    }
+
+    // → Promise dell'esito, per chi deve rispondere con quello (`FocusSession`).
+    async _focusTab(convo, project, origin, {extraStep = false, ts = global.get_current_time()} = {}) {
+        // `ts` nel default dei parametri: si valuta alla chiamata, cioè dentro
+        // l'evento del clic e PRIMA dell'attesa dell'helper. Dopo l'attesa
+        // l'evento è finito, e Mutter scarta un activate senza il timestamp di
+        // un input valido (focus-stealing-prevention).
+        //
+        // Due nomi perché il CLI rinomina una sessione in collisione, ma il
+        // titolo della tab resta il nome chiesto con `--name`.
+        const requested = convo.pid ? Model.procRequestedName(convo.pid) : null;
+        const names = [...new Set([convo.name, requested].map(n => (n ?? '').trim()).filter(Boolean))];
+        this.menu.close();
+
+        let {outcome, title} = await Desktop.switchPtyxisTab(names, {extraStep});
+        if (!this._alive) return outcome;
+        let win = title ? await Desktop.windowWithTitle(title) : null;
+        if (!this._alive) return outcome;
+        // La tab è davanti ma la sua finestra non si trova: chi ha cliccato non
+        // arriva alla conversazione.
+        if (!win && (outcome === 'tab' || outcome === 'esatta')) outcome = 'fallita';
+        win ??= Desktop.windowForSession(names, project, this._loomRegistry);
+        if (!win) outcome = 'nessuna';
+
+        log(`[Compass] focus ${outcome} ${origin}`);
+        if (win) Desktop.focusWindow(win, ts);
+        if (origin !== 'dbus')
+            this._focusNotice(outcome, project, convo.name || names[0] || `pid ${convo.pid}`);
+        return outcome;
+    }
+
+    // Banner della sorgente di compass, la stessa di «chiede conferma»: la
+    // stessa estensione resta una voce sola nel centro notifiche.
+    _focusNotice(outcome, project, name) {
+        const notice = FOCUS_NOTICE[outcome];
+        if (!notice) return;
+        const notification = this._newNotification(project?.label ?? 'Project Compass', notice(name), true);
+        this._getOrCreateSource().addNotification(notification);
     }
 
     // ── Modale sulla conversazione in focus (T159) ───────────────────────────
@@ -514,6 +610,7 @@ class CompassIndicator extends PanelMenu.Button {
     // ── Cleanup ──────────────────────────────────────────────────────────────
 
     destroy() {
+        this._alive = false;
         // Il Gio.Settings sopravvive all'indicatore (lo tiene CompassImpl fino
         // al disable): senza disconnect, un cambio dalla finestra delle
         // impostazioni ricostruirebbe il menu di un attore già distrutto.
