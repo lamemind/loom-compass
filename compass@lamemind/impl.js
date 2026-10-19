@@ -104,6 +104,8 @@ const FOCUS_NOTICE = {
     fallita: name => `Il salto alla tab «${name}» non è arrivato`,
     errore:  name => `Tab di «${name}» non raggiungibile: l'helper di accessibilità non ha risposto`,
     nessuna: name => `Nessuna finestra Ptyxis per «${name}»`,
+    // Il `sessionId` non è più nel registro vivo: non c'è un nome da dire.
+    sconosciuta: () => 'Conversazione non più viva: mostro la finestra del progetto',
 };
 
 // ── D-Bus interface ──────────────────────────────────────────────────────────
@@ -351,9 +353,10 @@ class CompassIndicator extends PanelMenu.Button {
         // riceve il profilo del cappello, e con quello non può sapere QUALE delle
         // N conversazioni del progetto ha cambiato stato. Leggere la marca dove il
         // suono avviene sarebbe impossibile senza cambiare la firma — lì il dato
-        // non è mai arrivato.
+        // non è mai arrivato. Per la stessa ragione scende anche il `sessionId`:
+        // il «Vai» della notifica porta alla tab di QUELLA conversazione.
         if (profileId) {
-            this.setState(profileId, state, this._priorityMuted(profileId, sessionId, state));
+            this.setState(profileId, state, this._priorityMuted(profileId, sessionId, state), sessionId);
             return;
         }
         this._refreshMenu();
@@ -396,7 +399,10 @@ class CompassIndicator extends PanelMenu.Button {
     // è decidibile, e il suono parte come ha sempre fatto. È una degradazione
     // muta, non un errore — chi ha un bridge più vecchio del plugin sente due
     // ding sulla conversazione marcata, non zero.
-    setState(profileId, state, muteSound = false) {
+    //
+    // `sessionId` segue lo stesso schema: assente sul canale vecchio, e lì il
+    // «Vai» della notifica porta alla finestra del progetto invece che alla tab.
+    setState(profileId, state, muteSound = false, sessionId = null) {
         const project = this._registry.find(p => p.profile === profileId);
         // La chiave è "conosciuta" se è il profilo UUID di un progetto del registry
         // vecchio (projects.json) OPPURE l'`id` di un cappello loom (dconf). I due
@@ -436,7 +442,7 @@ class CompassIndicator extends PanelMenu.Button {
             } else if (state === 'ask' && prevState !== 'ask') {
                 if (!muteSound) Desktop.playSound('bell');
                 // Fuori dal mute per decisione: il banner con «Vai» appare sempre.
-                this._showNotification(project, loomProject);
+                this._showNotification(project, loomProject, sessionId);
             }
         }
 
@@ -488,13 +494,21 @@ class CompassIndicator extends PanelMenu.Button {
         return notification;
     }
 
-    _showNotification(project, loomProject) {
+    // «Vai» porta alla tab della conversazione che chiede, quando il
+    // `sessionId` è arrivato (`SetSessionState`); sul canale vecchio
+    // (`SetState`) porta alla finestra del progetto, come prima della tab.
+    _showNotification(project, loomProject, sessionId = null) {
         const source       = this._getOrCreateSource();
         const displayName  = loomProject?.label ?? project.display ?? project.label;
         const notification = this._newNotification(displayName, 'chiede conferma');
 
         try {
             notification.addAction('Vai', () => {
+                if (sessionId) {
+                    this.focusSession(sessionId, 'vai', loomProject)
+                        .catch(e => logError(e, '[Compass] "Vai"'));
+                    return;
+                }
                 // `ts` catturato QUI, non dentro focusWindow: la chiusura del banner
                 // può far arrivare l'activate fuori dal contesto dell'evento, e con un
                 // timestamp corrente/0 la focus-stealing-prevention di Mutter lo scarta
@@ -571,6 +585,34 @@ class CompassIndicator extends PanelMenu.Button {
         if (origin !== 'dbus')
             this._focusNotice(outcome, project, convo.name || names[0] || `pid ${convo.pid}`);
         return outcome;
+    }
+
+    // Il focus di una conversazione nota solo per `sessionId`: il «Vai» della
+    // notifica e il metodo D-Bus `FocusSession`. → Promise dell'esito.
+    //
+    // Il registro vivo si rilegge qui: fra l'annuncio e l'azione possono passare
+    // minuti (un banner resta nel centro notifiche finché non lo chiudi, il deck
+    // chiama dal suo ultimo tick), e la conversazione può essere finita nel
+    // frattempo. Fuori dal registro l'esito è `sconosciuta` e l'helper non
+    // parte: non è un fallimento del salto, e chi chiama deve poter dire
+    // «riprendila» invece di «non c'è la tab». Il «Vai» ripiega allora sulla
+    // finestra del progetto, come prima della tab.
+    //
+    // `project` = il cappello già noto al chiamante (la notifica lo porta);
+    // senza, si risale dal `cwd` della sessione.
+    async focusSession(sessionId, origin, project = null) {
+        // Prima di ogni attesa, come in `_focusTab`.
+        const ts = global.get_current_time();
+        const session = Model.loadLiveSessions(this._channels).find(s => s.sessionId === sessionId);
+        project ??= session ? Model.projectForSession(this._loomRegistry, session) : null;
+        if (session) return this._focusTab(session, project, origin, {ts});
+
+        log(`[Compass] focus sconosciuta ${origin}`);
+        if (origin === 'dbus') return 'sconosciuta';
+        const win = Desktop.findNotificationWindow(this._loomRegistry, project);
+        if (win) Desktop.focusWindow(win, ts);
+        this._focusNotice('sconosciuta', project, sessionId);
+        return 'sconosciuta';
     }
 
     // Banner della sorgente di compass, la stessa di «chiede conferma»: la

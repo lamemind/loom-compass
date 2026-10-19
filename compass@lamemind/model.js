@@ -442,6 +442,23 @@ export function sessionsForProject(project, liveSessions) {
         .sort((a, b) => a.startedAt - b.startedAt);
 }
 
+// Il cappello di UNA sessione viva, per chi la conosce solo per `sessionId`
+// (il focus chiesto via D-Bus): il progetto la cui `dir` contiene il suo `cwd`,
+// stesso criterio di `sessionsForProject`. Fra due `dir` annidate vince la più
+// profonda, come il longest-match sul titolo: un submodule registrato come
+// progetto a sé resta suo, non del cappello che lo contiene.
+export function projectForSession(loomRegistry, session) {
+    let best = null, bestLen = 0;
+    for (const p of loomRegistry) {
+        const dir = expandDir(p.dir);
+        if (!dir || dir.length <= bestLen) continue;
+        if (session.cwd !== dir && !session.cwd.startsWith(dir + '/')) continue;
+        best    = p;
+        bestLen = dir.length;
+    }
+    return best;
+}
+
 // ── Marche per-conversazione: il sidecar del deck (T158) ─────────────────────
 //
 // `<project-dir>/.claude/loom/session-tasks.jsonl` — lo stesso file JSONL
