@@ -355,6 +355,28 @@ export function sessionsByName(sessions, title, requestedNameOf = procRequestedN
 // di shell. La ragione di ogni esclusione sta accanto alla copia del deck.
 export const TWIN_MARKS = ['#', '+', '=', '~', '^', '%', '@', '*', '?', '!'];
 
+// Il titolo da dare alla tab claude che sta per nascere: `base` se nessuna
+// conversazione viva l'ha chiesto, altrimenti `base` + spazio + il primo
+// carattere di TWIN_MARKS che nessuna viva porta già su quel nome. Insieme
+// esaurito → `base`: il lancio parte comunque, e chi cerca la tab per titolo
+// torna all'esito ambiguo che ha anche senza lanciatore.
+//
+// Funzione pura: `requestedNames` sono i nomi CHIESTI dalle vive
+// (procRequestedName), non i nomi effettivi del registro — il CLI rinomina una
+// sessione in collisione, ma il titolo della tab resta il nome chiesto. Il
+// confronto è per uguaglianza intera, come in sessionsByName.
+//
+// GEMELLA di `twinTitle` in `loom-deck/src/twin-title.ts`.
+export function twinTitle(base, requestedNames) {
+    const taken = new Set(requestedNames);
+    if (!taken.has(base)) return base;
+    for (const mark of TWIN_MARKS) {
+        const candidate = `${base} ${mark}`;
+        if (!taken.has(candidate)) return candidate;
+    }
+    return base;
+}
+
 // Il file resta su disco dopo un `kill -9`, e il pid può essere riciclato da
 // un processo estraneo: la sola presenza del file non prova niente. Vivo =
 // /proc esiste E il suo `starttime` combacia con il `procStart` registrato.

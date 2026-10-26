@@ -13,7 +13,8 @@
 // Nessun import locale, nessun widget, nessuno stato d'istanza: i registri
 // arrivano per argomento. `launchTracked` riceve una LAMBDA di risoluzione, non
 // un registro: deve rileggere la finestra nell'istante del click, e un array
-// passato dal chiamante sarebbe catturato alla costruzione del menu.
+// passato dal chiamante sarebbe catturato alla costruzione del menu. Per la
+// stessa ragione riceve in lambda anche il titolo della tab claude (T182).
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
@@ -289,7 +290,15 @@ export function resolveDefaultSurface(project) {
 // Qui c'è solo la composizione dell'argv per `kind`; l'orchestrazione
 // focus-then-tab, che è la parte delicata, sta in `coalesceTab` — condivisa con
 // la ripresa di una conversazione, che ha lo stesso identico bisogno.
-export function launchTracked(project, kind, ts, findProjectWindow) {
+//
+// `claudeTitle` (T182) è la lambda che dà il titolo della tab claude: la label
+// del progetto, più il carattere del gemello se una conversazione viva ha già
+// chiesto quel nome. Il ramo `claude` la valuta dentro `spawnTab`, cioè
+// all'ultimo istante prima dello spawn e dopo l'eventuale attesa di
+// `coalesceTab`: un titolo calcolato al click sarebbe più vecchio dell'attesa,
+// e una conversazione nata nel frattempo resterebbe invisibile. Gli altri rami
+// la ignorano; assente, o in errore, il titolo è la label.
+export function launchTracked(project, kind, ts, findProjectWindow, claudeTitle = null) {
     try {
         const dir = projectDir(project);
 
@@ -346,7 +355,12 @@ export function launchTracked(project, kind, ts, findProjectWindow) {
                 // passato come argomento non ha quoting da sbagliare.
                 // `exec bash` tiene viva la tab all'uscita di claude, come il
                 // custom-command del vecchio profilo.
-                const title = project.label;
+                let title = project.label;
+                try {
+                    if (claudeTitle) title = claudeTitle() || project.label;
+                } catch (e) {
+                    logError(e, '[Compass] launchTracked claudeTitle');
+                }
                 const inner = 'PTYXIS_PROFILE="$2" claude --name "$1"; exec bash';
                 argv = newWindow
                     ? ['ptyxis', '--new-window', '-d', dir, '-T', title, '--', 'bash', '-lc', inner, 'bash', title, project.id]

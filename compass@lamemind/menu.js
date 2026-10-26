@@ -905,7 +905,7 @@ export function fillLoomHeader(self, item, project, wins, sessions = []) {
             // catturato → focus davvero consegnato a Ptyxis (vedi launchTracked).
             const ts = global.get_current_time();
             self.menu.close();
-            Desktop.launchTracked(project, 'claude', ts, findProjectWindow);
+            Desktop.launchTracked(project, 'claude', ts, findProjectWindow, claudeTitleFor(self, project));
         });
         row.add_child(newClaudeBtn);
     }
@@ -976,6 +976,25 @@ export function wireSurfaceButton(self, btn, project, kind, win, findProjectWind
     btn.connect('clicked', () => {
         const ts = global.get_current_time();
         self.menu.close();
-        Desktop.launchTracked(project, kind, ts, findProjectWindow);
+        Desktop.launchTracked(project, kind, ts, findProjectWindow, claudeTitleFor(self, project));
     });
+}
+
+// Il titolo della tab claude che `launchTracked` sta per aprire, come LAMBDA
+// (T182): la label del progetto, più il carattere del gemello se una
+// conversazione viva ha già chiesto lo stesso nome. Un solo helper per i due
+// lanci di claude — il bottone 🤖 e il bottone-nome quando il default è claude.
+//
+// Il registro si rilegge quando la lambda gira, non si usa `_liveSessions`
+// letta all'apertura del menu: una conversazione aperta dal deck fra l'apertura
+// e lo spawn sarebbe altrimenti invisibile, e il gemello partirebbe col nome
+// base — proprio il caso per cui il carattere esiste. Nessun filtro per
+// progetto: chi cerca la tab per titolo la cerca in tutte le finestre.
+function claudeTitleFor(self, project) {
+    return () => Model.twinTitle(
+        project.label,
+        Model.loadLiveSessions(self._channels)
+            .map(s => Model.procRequestedName(s.pid))
+            .filter(n => n !== null),
+    );
 }
