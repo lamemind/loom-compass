@@ -529,17 +529,31 @@ const SAFE_MODEL = /^(fable|opus|sonnet|haiku)$/;
  * `~/.claude/projects/` dentro i sorgenti dell'estensione, e leggere là dentro
  * è precisamente ciò che compass non fa. Una pinnata stale si riprende e
  * fallisce nella tab, che è il posto dove si vede.
+ *
+ * `onFail(reason)` riceve ogni ripresa che NON apre la tab — `deck-run` non
+ * risolvibile, sessionId fuori alfabeto, spawn rifiutato, `deck-run` uscito
+ * con un errore — e il chiamante la porta a schermo. Il clic è appena
+ * avvenuto: senza un avviso, una ripresa fallita è indistinguibile da un menu
+ * che non risponde, e la causa resta solo nel journal.
  */
-export function launchResume(project, spec, ts, findProjectWindow) {
+export function launchResume(project, spec, ts, findProjectWindow, onFail = () => {}) {
+    const fail = (reason) => {
+        log(`[Compass] ripresa fallita: ${reason}`);
+        try {
+            onFail(reason);
+        } catch (e) {
+            logError(e, '[Compass] launchResume onFail');
+        }
+    };
     try {
         const deckRun = deckRunPath();
         if (!deckRun) {
-            log('[Compass] ripresa impossibile: deck-run non risolvibile da `loom-deck` in PATH');
+            fail('deck-run non risolvibile da `loom-deck` in PATH');
             return;
         }
         const sid = SAFE_SID.test(spec?.sessionId ?? '') ? spec.sessionId : null;
         if (!sid) {
-            log(`[Compass] ripresa impossibile: sessionId fuori alfabeto (${spec?.sessionId})`);
+            fail(`sessionId fuori alfabeto (${spec?.sessionId})`);
             return;
         }
         const taskId = SAFE_TASK.test(spec.taskId ?? '')  ? spec.taskId : null;
@@ -555,23 +569,57 @@ export function launchResume(project, spec, ts, findProjectWindow) {
             if (nota) argv.push('--title-note', nota);
             if (newWindow) argv.push('--new-window');
             try {
-                const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
+                const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.STDERR_PIPE});
                 launcher.set_cwd(dir);
                 // Esplicita e non lasciata a `$PWD`: `deck-run` la usa sia per
                 // `ptyxis -d` sia per risalire alla project root da cui legge
                 // identità e permissionMode, e dipendere dal `PWD` che bash
                 // deriva dal cwd è un anello in più senza guadagno.
                 launcher.setenv('LOOM_DECK_WORKDIR', dir, true);
-                launcher.spawnv(argv);
+                watchDeckRunExit(launcher.spawnv(argv), fail);
             } catch (e) {
                 logError(e, '[Compass] launchResume spawn');
+                fail(e.message);
             }
         };
 
         coalesceTab(project, ts, findProjectWindow, spawnTab);
     } catch (e) {
         logError(e, '[Compass] launchResume');
+        fail(e.message);
     }
+}
+
+// L'uscita di `deck-run`, letta senza bloccare il compositore.
+//
+// `deck-run` esce appena Ptyxis ha preso in carico la tab, e un'uscita diversa
+// da 0 vuol dire che la tab non è nata: errore d'uso (2), `node` assente dal
+// PATH di gnome-shell (127 — `scripts/deck-run` è uno shim che fa `exec node`,
+// e gnome-shell non legge `~/.bashrc`, dove nvm e simili estendono il PATH),
+// Ptyxis che rifiuta. Lo stderr viaggia in un pipe, e la sua ultima riga è
+// quella che nomina la causa («exec: node: not found»). Su un'uscita 0 lo
+// stderr va comunque nel journal, dove arrivava da sé prima del pipe: lì
+// `deck-run` avvisa dei valori scartati con fallback.
+//
+// Se Ptyxis non gira ancora, il `ptyxis` lanciato da `deck-run` diventa
+// l'istanza primaria e vive finché il terminale resta aperto, e `deck-run` lo
+// aspetta: l'uscita arriva allora alla chiusura del terminale, di norma 0.
+function watchDeckRunExit(proc, fail) {
+    proc.communicate_utf8_async(null, null, (p, res) => {
+        try {
+            const [, , stderr] = p.communicate_utf8_finish(res);
+            const err = (stderr ?? '').trim();
+            if (p.get_successful()) {
+                if (err) log(`[Compass] deck-run: ${err}`);
+                return;
+            }
+            const how  = p.get_if_exited() ? `uscita ${p.get_exit_status()}` : `segnale ${p.get_term_sig()}`;
+            const last = err.split('\n').pop();
+            fail(last ? `deck-run, ${how}: ${last}` : `deck-run, ${how}`);
+        } catch (e) {
+            logError(e, '[Compass] deck-run uscita');
+        }
+    });
 }
 
 // Esegue il command di una surface launch con cwd = project root.

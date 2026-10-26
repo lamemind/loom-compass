@@ -647,6 +647,14 @@ class CompassIndicator extends PanelMenu.Button {
         this._getOrCreateSource().addNotification(notification);
     }
 
+    // Banner di una pinnata che non si è riaperta (`Desktop.launchResume`):
+    // transient come `_focusNotice`, perché riguarda il clic appena fatto.
+    _resumeNotice(project, reason) {
+        const notification = this._newNotification(
+            project?.label ?? 'Project Compass', `ripresa non riuscita — ${reason}`, true);
+        this._getOrCreateSource().addNotification(notification);
+    }
+
     // ── Modale sulla conversazione in focus (T159) ───────────────────────────
 
     // Chiamata dalla scorciatoia globale, registrata da CompassImpl.

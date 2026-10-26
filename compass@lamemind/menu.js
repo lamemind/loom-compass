@@ -650,7 +650,8 @@ export function pinnedRow(self, project, entry) {
                     title: mark.title,
                 },
                 ts,
-                findProjectWindow
+                findProjectWindow,
+                (reason) => self._resumeNotice(project, reason)
             );
         }));
     }
