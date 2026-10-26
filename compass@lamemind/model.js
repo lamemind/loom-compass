@@ -339,6 +339,22 @@ export function sessionsByName(sessions, title, requestedNameOf = procRequestedN
     );
 }
 
+// I caratteri della conversazione GEMELLA (T182), nell'ordine in cui si
+// assegnano: quando una conversazione viva ha già chiesto lo stesso `--name`, il
+// lancio nuovo porta in coda, dopo uno spazio, il primo che nessuna viva porta
+// già su quel nome. Il primo lancio resta senza carattere.
+//
+// GEMELLA di `TWIN_MARKS` in `loom-deck/src/twin-title.ts`, l'altro lanciatore
+// di conversazioni (`deck-run`): nessun codice confronta le due copie, e
+// cambiarne una sola fa scegliere caratteri diversi ai due lanciatori senza
+// errore. Si toccano insieme.
+//
+// Tutti ASCII a una cella, nessuno nell'alfabeto della nota del titolo (un
+// carattere ammesso lì può arrivare da una nota digitata), nessuno in `[\w-]`
+// (il lookahead negativo di `titleKeyRe`), nessun apice e nessun metacarattere
+// di shell. La ragione di ogni esclusione sta accanto alla copia del deck.
+export const TWIN_MARKS = ['#', '+', '=', '~', '^', '%', '@', '*', '?', '!'];
+
 // Il file resta su disco dopo un `kill -9`, e il pid può essere riciclato da
 // un processo estraneo: la sola presenza del file non prova niente. Vivo =
 // /proc esiste E il suo `starttime` combacia con il `procStart` registrato.
