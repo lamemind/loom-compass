@@ -351,7 +351,8 @@ export function sessionsByName(sessions, title, requestedNameOf = procRequestedN
 //
 // Tutti ASCII a una cella, nessuno nell'alfabeto della nota del titolo (un
 // carattere ammesso lì può arrivare da una nota digitata), nessuno in `[\w-]`
-// (il lookahead negativo di `titleKeyRe`), nessun apice e nessun metacarattere
+// (si leggerebbe come parte del nome; senza lo spazio separatore spezzerebbe il
+// lookahead negativo di `titleKeyRe`), nessun apice e nessun metacarattere
 // di shell. La ragione di ogni esclusione sta accanto alla copia del deck.
 export const TWIN_MARKS = ['#', '+', '=', '~', '^', '%', '@', '*', '?', '!'];
 
