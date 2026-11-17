@@ -378,6 +378,38 @@ export function twinTitle(base, requestedNames) {
     return base;
 }
 
+// Che cosa è il processo di una entry del registro (T206): `tab`, `headless`
+// o `null`.
+//
+// `tab` è una conversazione in una tab dell'utente (`entrypoint:"cli"`,
+// `kind:"interactive"`): l'unica che il menu mostra come riga, porta davanti e
+// conta nel rollup. `headless` è un turno `claude -p` in corso
+// (`entrypoint:"sdk-cli"`): un processo che scrive sul transcript senza una tab
+// a cui tornare. Tutto il resto è `null`: subagent SDK, spare pty host, e il job
+// in background, che scrive `entrypoint:"cli"` come una tab vera e si distingue
+// solo per `kind:"bg"`. Per questo le due classi si riconoscono IN POSITIVO,
+// campo per campo: allargare il filtro delle tab farebbe entrare il job.
+// Entrambi i campi assenti valgono tab: una versione del CLI che non li
+// scrivesse non deve svuotare il menu.
+//
+// GEMELLA di `processClass` in `loom-deck/src/live-sessions.ts` e di
+// `process_class` in `loom-works-plugin/scripts/regia/regia_common.py`: tre
+// copie in tre linguaggi, nessuna importa le altre, e una regola cambiata in
+// una sola fa vedere due registri diversi senza errore.
+export function registryClass(s) {
+    if ((s.kind ?? 'interactive') !== 'interactive') return null;
+    const entrypoint = s.entrypoint ?? 'cli';
+    if (entrypoint === 'cli') return 'tab';
+    if (entrypoint === 'sdk-cli') return 'headless';
+    return null;
+}
+
+// Il registro dei processi vivi in una lettura sola, diviso per classe: `live`
+// le tab, `headless` i turni `claude -p` in corso (T206). Due liste e non un
+// campo in più sulla stessa: tutto ciò che legge le vive — rollup, righe,
+// focus, gemelli del titolo — presuppone una tab, e una headless non deve poter
+// finire in uno di quei rami per una condizione dimenticata.
+//
 // Il file resta su disco dopo un `kill -9`, e il pid può essere riciclato da
 // un processo estraneo: la sola presenza del file non prova niente. Vivo =
 // /proc esiste E il suo `starttime` combacia con il `procStart` registrato.
@@ -385,9 +417,11 @@ export function twinTitle(base, requestedNames) {
 // Chiude potando gli stati per-sessione, e le due cose restano saldate come nel
 // codice da cui questa funzione esce: separarle darebbe una firma più onesta ma
 // due chiamanti da tenere allineati (`_init` e `_refreshMenu`), e dimenticarne
-// uno non produce nessun errore — solo stati fantasma accesi per sempre.
-export function loadLiveSessions(channels) {
+// uno non produce nessun errore — solo stati fantasma accesi per sempre. La
+// potatura guarda le sole tab: un turno headless non annuncia stati.
+export function loadRegistry(channels) {
     const live = [];
+    const headless = [];
     try {
         const dirPath = GLib.build_filenamev([GLib.get_home_dir(), '.claude', 'sessions']);
         const dir     = Gio.File.new_for_path(dirPath);
@@ -397,7 +431,7 @@ export function loadLiveSessions(channels) {
             en = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
         } catch (_e) {
             pruneSessionStates(channels, live);
-            return live; // directory assente (nessun Claude Code mai avviato) → zero sessioni
+            return {live, headless}; // directory assente (nessun Claude Code mai avviato) → zero sessioni
         }
 
         let info;
@@ -409,22 +443,10 @@ export function loadLiveSessions(channels) {
                 if (!ok) continue;
                 const s = JSON.parse(new TextDecoder().decode(bytes));
                 if (!s?.pid || !s?.cwd) continue;
-                // Il registro tiene un file anche per i processi che non sono
-                // una conversazione dell'utente: subagent SDK, fork parkeggiati
-                // in background, spare pty host. Hanno lo stesso `cwd` del
-                // progetto ma nessuna tab a cui tornare, ed elencarli direbbe
-                // che l'utente ha aperte sessioni che non può raggiungere.
-                //
-                // Servono DUE gate perché i due campi si sono separati: un job
-                // in background di Claude Code scrive `entrypoint:"cli"` come
-                // una sessione vera e si distingue solo per `kind:"bg"`. Il
-                // gate su `entrypoint` da solo lo lascia passare, e il pid è
-                // davvero vivo — quindi nemmeno il controllo su `procStart`
-                // lo scarta.
-                if ((s.entrypoint ?? 'cli') !== 'cli') continue;
-                if ((s.kind ?? 'interactive') !== 'interactive') continue;
+                const kind = registryClass(s);
+                if (!kind) continue;
                 if (procStarttime(s.pid) !== String(s.procStart)) continue;
-                live.push({
+                (kind === 'tab' ? live : headless).push({
                     pid:       s.pid,
                     sessionId: s.sessionId ?? null,
                     cwd:       s.cwd,
@@ -439,10 +461,16 @@ export function loadLiveSessions(channels) {
         }
         en.close(null);
     } catch (e) {
-        logError(e, '[Compass] loadLiveSessions');
+        logError(e, '[Compass] loadRegistry');
     }
     pruneSessionStates(channels, live);
-    return live;
+    return {live, headless};
+}
+
+// Le sole tab vive: chi non ha bisogno dei turni headless (focus via D-Bus,
+// gemelli del titolo) legge questa.
+export function loadLiveSessions(channels) {
+    return loadRegistry(channels).live;
 }
 
 // Toglie gli stati per-sessione che non hanno più un processo vivo a
@@ -687,20 +715,30 @@ export function writeSessionMark(projectDir, sessionId, field, value) {
  * il desktop. La ripresa di una stale parte e fallisce dentro la tab, che è il
  * posto giusto per vederlo.
  */
-export function pinnedForProject(project, marks, liveSessions) {
-    const live = new Map(
-        sessionsForProject(project, liveSessions)
+export function pinnedForProject(project, marks, liveSessions, headlessSessions = []) {
+    const byId = (list) => new Map(
+        sessionsForProject(project, list)
             .filter(s => s.sessionId)
             .map(s => [s.sessionId, s])
     );
+    const live = byId(liveSessions);
+    const headless = byId(headlessSessions);
+    // T206/P10 — `headless`: la pinnata ha un turno `claude -p` in corso. Non è
+    // una viva (nessuna tab da portare davanti) e non è una morta da riprendere:
+    // un `launchResume` aprirebbe un secondo processo sullo stesso transcript.
+    // Una pinnata con una tab viva non porta mai anche `headless`.
     return [...marks.entries()]
         .filter(([, m]) => m.pinned === true)
         .sort((a, b) => (b[1].pinRank ?? 0) - (a[1].pinRank ?? 0))
-        .map(([sessionId, mark]) => ({
-            sessionId,
-            mark,
-            session: live.get(sessionId) ?? null,
-        }));
+        .map(([sessionId, mark]) => {
+            const session = live.get(sessionId) ?? null;
+            return {
+                sessionId,
+                mark,
+                session,
+                headless: session ? null : (headless.get(sessionId) ?? null),
+            };
+        });
 }
 
 // ── Età di una sessione (T149) ────────────────────────────────────────────

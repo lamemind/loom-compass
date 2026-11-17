@@ -498,11 +498,14 @@ export function addLoomProject(self, project) {
     // leggono due blocchi (i toggle delle righe-sessione e le pinnate), che è
     // una ragione in più per leggerle qui e passarle giù.
     const marks  = Model.loadSessionMarks(project.dir);
-    const pinned = Model.pinnedForProject(project, marks, self._liveSessions);
+    // T206 — i turni headless in corso del progetto: nessuna riga (non c'è una
+    // tab a cui tornare), un contatore accanto al nome e il glifo sulla pinnata.
+    const headless = Model.sessionsForProject(project, self._headlessSessions ?? []);
+    const pinned = Model.pinnedForProject(project, marks, self._liveSessions, headless);
 
     const item = new PopupMenu.PopupBaseMenuItem({activate: false});
     hideOrnament(item);
-    const row = fillLoomHeader(self, item, project, wins, sessions);
+    const row = fillLoomHeader(self, item, project, wins, sessions, headless.length);
 
     // I due chevron dentro `row` (non nell'item) per stare sulla stessa riga,
     // all'estrema destra — lo spacer di `fillLoomHeader` li spinge lì. Ognuno
@@ -551,6 +554,17 @@ export function addLoomProject(self, project) {
  *  non ce n'è una. Il cerchio vuoto dice «c'è, ma non sta girando». */
 const PINNED_DEAD_GLYPH = '○';
 
+/** T206 — un turno headless (`claude -p`) in corso: lo stesso glifo del deck
+ *  (`LIVE_HEADLESS` in `loom-deck/src/glyphs.ts`), per la stessa cosa. Sta nel
+ *  contatore accanto al nome del progetto e sulla pinnata il cui turno gira. */
+export const HEADLESS_GLYPH = '◐';
+
+/** T206/D1 — il contatore dei turni headless in corso di un progetto, `◐2`, o
+ *  stringa vuota a zero: nessun turno, nessun segno. */
+export function headlessCounter(count) {
+    return count > 0 ? `${HEADLESS_GLYPH}${count}` : '';
+}
+
 /** Quanti caratteri di `sessionId` bastano a distinguere una conversazione
  *  quando non ha né nota né titolo. Sono UUID: otto cifre esadecimali sono già
  *  più di quante ne servano dentro un progetto solo, e la riga non deve
@@ -595,6 +609,8 @@ export function pinnedLabel(sessionId, mark) {
  * Il clic sul titolo va a QUELLA conversazione, con due azioni secondo il
  * glifo: una viva porta davanti la sua tab, come la riga-sessione; una morta si
  * riprende in una tab nuova della finestra del progetto (`Desktop.launchResume`).
+ * T206/P10 — una terza forma, `◐`: un turno headless in corso. Nessun clic: non
+ * c'è una tab, e la ripresa aprirebbe un secondo processo sul transcript.
  *
  * Una viva non si riprende mai, e il rischio che questo chiude non è estetico:
  * una conversazione viva ripresa una seconda volta sono due processi `claude`
@@ -607,7 +623,7 @@ export function pinnedLabel(sessionId, mark) {
  * vive.
  */
 export function pinnedRow(self, project, entry) {
-    const {sessionId, mark, session} = entry;
+    const {sessionId, mark, session, headless} = entry;
     const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false});
     hideOrnament(item);
     const row = new St.BoxLayout({
@@ -617,7 +633,7 @@ export function pinnedRow(self, project, entry) {
 
     const glyph = session
         ? (Model.STATE_EMOJI[Model.sessionState(session, self._channels)] ?? '⚪')
-        : PINNED_DEAD_GLYPH;
+        : headless ? HEADLESS_GLYPH : PINNED_DEAD_GLYPH;
 
     const label = new St.Label({
         text: `${glyph}  ${pinnedLabel(sessionId, mark)}`,
@@ -629,6 +645,11 @@ export function pinnedRow(self, project, entry) {
     if (session) {
         // Viva → la sua tab davanti, come il clic sulla riga-sessione.
         row.add_child(labelButton(label, () => self._focus(session, project, 'pinnata')));
+    } else if (headless) {
+        // T206/P10 — turno headless in corso: nessuna tab da portare davanti, e
+        // la ripresa sarebbe il secondo scrittore sullo stesso transcript.
+        // Etichetta nuda, non cliccabile, finché il turno non finisce.
+        row.add_child(label);
     } else {
         const findProjectWindow = projectWindowResolver(self, project);
         row.add_child(labelButton(label, () => {
@@ -817,7 +838,7 @@ function markToggle(project, sessionId, field, initial) {
 // che riempie l'item (x_expand FILL) e impacchetta a sinistra di default →
 // contenuto ancorato a sinistra. Ritorna `row` così il caller può appendere
 // il chevron dentro la stessa riga.
-export function fillLoomHeader(self, item, project, wins, sessions = []) {
+export function fillLoomHeader(self, item, project, wins, sessions = [], headlessCount = 0) {
     const row = new St.BoxLayout({
         style_class: 'compass-loom-row',
         x_expand: true, x_align: Clutter.ActorAlign.FILL,
@@ -878,6 +899,23 @@ export function fillLoomHeader(self, item, project, wins, sessions = []) {
     const defKind = Desktop.resolveDefaultSurface(project);
     wireSurfaceButton(self, nameBtn, project, defKind, wins.win, findProjectWindow);
     row.add_child(nameBtn);
+
+    // T206/D1 — `◐N`: i turni headless (`claude -p`) in corso del progetto.
+    // Senza, la top bar direbbe «fermo» mentre la regia ha tre turni al lavoro:
+    // un turno headless non annuncia stati e non entra nel rollup del dot.
+    // Etichetta e non bottone: non c'è una tab a cui portare, e un clic che
+    // non fa niente sarebbe da spiegare.
+    const counter = headlessCounter(headlessCount);
+    if (counter) {
+        // Stile inline e non una classe nuova in stylesheet.css: lo shell tiene
+        // il foglio in cache fino al relogin, e una classe aggiunta non si vede
+        // al reload dell'estensione.
+        row.add_child(new St.Label({
+            text: counter,
+            style: 'padding: 0 4px; font-size: 0.9em;',
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+    }
 
     // spacer — St.Widget vuoto che espande e mangia lo spazio tra il nome e il
     // gruppo destro. NON è un bottone → non centra nulla, non intercetta click:

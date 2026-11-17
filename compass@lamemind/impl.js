@@ -221,6 +221,7 @@ class CompassIndicator extends PanelMenu.Button {
         this._registry  = [];
         this._loomRegistry = []; // registry dconf loom (T34) — cappelli + surface
         this._liveSessions = []; // registro ~/.claude/sessions filtrato sui vivi (T119)
+        this._headlessSessions = []; // T206 — turni `claude -p` in corso, accanto alle tab e mai dentro
         this._loomWins           = null; // cache window-map (project-level) progetti loom
         this._scroll             = null; // St.ScrollView del popup — montata una volta (Menu.mountScroll)
         this._section            = null; // PopupMenuSection dentro la scroll: qui buildMenu costruisce
@@ -278,7 +279,7 @@ class CompassIndicator extends PanelMenu.Button {
         // produce una riga di progetto in meno, una volta sola, all'avvio.
         this._registry     = Model.loadLegacyRegistry(this._ext.path);
         this._loomRegistry = Model.loadLoomRegistry();
-        this._liveSessions = Model.loadLiveSessions(this._channels);
+        this._loadSessions();
         // La zona scorrevole prima del primo menu, e mai più: `buildMenu` ci
         // costruisce dentro e la dà per montata (`this._section`). La coda
         // «Impostazioni» subito dopo, e anche lei una volta sola: `buildMenu`
@@ -319,7 +320,7 @@ class CompassIndicator extends PanelMenu.Button {
             // Niente cache sul registro vivo: `status` cambia a ogni turno, e una
             // cache mostrerebbe idle su una sessione che sta lavorando — cioè il
             // difetto esatto che la vista esiste per non avere.
-            this._liveSessions = Model.loadLiveSessions(this._channels);
+            this._loadSessions();
             Menu.buildMenu(this);
             this._updateBadge();
         });
@@ -410,8 +411,15 @@ class CompassIndicator extends PanelMenu.Button {
     // riletto qui, non solo all'apertura del menu, o col menu tenuto aperto le
     // righe resterebbero ferme sull'istantanea del momento in cui è stato aperto.
     // Costa la lettura di una manciata di file piccoli.
+    // T206 — tab vive e turni headless dalla stessa lettura del registro: due
+    // letture potrebbero vedere lo stesso turno in tutte e due, o in nessuna,
+    // se parte o finisce fra l'una e l'altra.
+    _loadSessions() {
+        ({live: this._liveSessions, headless: this._headlessSessions} = Model.loadRegistry(this._channels));
+    }
+
     _refreshMenu() {
-        this._liveSessions = Model.loadLiveSessions(this._channels);
+        this._loadSessions();
         Menu.buildMenu(this);
         this._updateBadge();
     }
@@ -666,7 +674,7 @@ class CompassIndicator extends PanelMenu.Button {
     // vecchio, incluse conversazioni già chiuse.
     openSessionDialog() {
         this._loomRegistry = Model.loadLoomRegistry();
-        this._liveSessions = Model.loadLiveSessions(this._channels);
+        this._loadSessions();
 
         // Il writer viaggia come argomento perché il modale non deve sapere dove
         // finisce la conferma — e perché è il writer di T158, non uno nuovo: pin
