@@ -141,6 +141,13 @@ const DBUS_INTERFACE_XML = `
       <arg type="s" name="session_id" direction="in"/>
       <arg type="s" name="esito"      direction="out"/>
     </method>
+    <!-- Sola lettura: dice se la finestra in focus è del progetto (si, no,
+         ignoto) senza cambiare tab, finestra o desktop. Lo chiama il deck prima
+         di aprire una tab chiesta da una conversazione (T198). -->
+    <method name="ProjectFocused">
+      <arg type="s" name="project_id" direction="in"/>
+      <arg type="s" name="esito"      direction="out"/>
+    </method>
   </interface>
 </node>`;
 
@@ -186,6 +193,13 @@ class CompassService {
             outcome = 'errore';
         }
         return new GLib.Variant('(s)', [outcome]);
+    }
+
+    // Sincrono: legge il focus e il registry già in memoria, nessuna attesa.
+    // Un'eccezione diventa un errore D-Bus, che il deck tratta come «non lo
+    // so» — apre e lo dice —, e non un `no` che rifiuterebbe a torto.
+    ProjectFocused(projectId) {
+        return new GLib.Variant('(s)', [this._indicator.projectFocused(projectId)]);
     }
 }
 
@@ -644,6 +658,23 @@ class CompassIndicator extends PanelMenu.Button {
         if (win) Desktop.focusWindow(win, ts);
         this._focusNotice('sconosciuta', project, sessionId);
         return 'sconosciuta';
+    }
+
+    // La finestra in focus è del progetto `projectId`? Il metodo D-Bus
+    // `ProjectFocused` (T198), esiti in `Desktop.projectFocusOutcome`.
+    //
+    // Il registry in memoria si rilegge solo quando non conosce il progetto: è
+    // fresco all'ultima apertura del menu, e un progetto registrato dopo
+    // risponderebbe `ignoto` fino al prossimo giro di menu. Il `dconf dump`
+    // costa un processo, e il caso normale non lo paga.
+    projectFocused(projectId) {
+        let outcome = Desktop.projectFocusOutcome(projectId, this._loomRegistry);
+        if (outcome === 'ignoto') {
+            this._loomRegistry = Model.loadLoomRegistry();
+            outcome = Desktop.projectFocusOutcome(projectId, this._loomRegistry);
+        }
+        log(`[Compass] project-focused ${outcome} ${projectId}`);
+        return outcome;
     }
 
     // Banner della sorgente di compass, la stessa di «chiede conferma»: la

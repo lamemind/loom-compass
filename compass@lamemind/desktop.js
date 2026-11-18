@@ -56,10 +56,51 @@ export function titleKeyRe(name) {
 // ── Window matching ──────────────────────────────────────────────────────────
 
 export function getPtyxisWindows() {
-    return global.display.list_all_windows().filter(w => {
-        const cls = w.get_wm_class() ?? '';
-        return cls.toLowerCase().includes('ptyxis');
-    });
+    return global.display.list_all_windows().filter(isPtyxisWindow);
+}
+
+function isPtyxisWindow(win) {
+    return (win.get_wm_class() ?? '').toLowerCase().includes('ptyxis');
+}
+
+// ── La finestra in focus è del progetto? (T198) ──────────────────────────────
+//
+// La domanda del deck prima di aprire una tab chiesta da una conversazione:
+// Ptyxis apre `--tab` nella SUA finestra attiva, e la tab di un progetto nata
+// nella finestra di un altro progetto è una tab persa. Il deck non sposta il
+// focus per farla nascere al posto giusto — la tastiera di chi sta scrivendo
+// altrove finirebbe nella tab nuova —, quindi chiede e, sul `no`, rifiuta.
+//
+// Tre esiti, una parola ciascuno:
+//   `si`     — la finestra in focus è una finestra Ptyxis del progetto;
+//   `no`     — non lo è: un altro progetto, una finestra Ptyxis senza chiave,
+//              un'altra applicazione, o nessuna finestra in focus;
+//   `ignoto` — il progetto non è nel registry: compass non sa quale chiave
+//              cercare, e il deck tratta la risposta come «non lo so».
+//
+// La finestra del PROGETTO, non quella che tiene la tab del deck (D2 preflight
+// T198): il titolo di una finestra Ptyxis è quello della sua tab attiva, e ogni
+// surface del progetto lo titola con `<emoji> <name>` — `projectForTitle`, lo
+// stesso match del menu. Così una conversazione del progetto in una finestra
+// diversa da quella del deck può chiedere uno spawn, e la tab nasce accanto a
+// lei.
+//
+// Ptyxis e non una finestra qualunque col titolo giusto: col focus su un'altra
+// applicazione la tab nasce nell'ultima finestra Ptyxis attiva, che può essere
+// di un altro progetto.
+//
+// Una lettura sola, senza attesa (P2 preflight T198): `get_focus_window()`
+// anticipa il focus reale solo durante un cambio di desktop, e qui nessuno lo
+// chiede — il caso richiede l'utente che cambia desktop nell'istante della
+// richiesta. Sola lettura: nessuna tab, finestra o desktop cambia.
+//
+// `win` ha un default per lo stesso motivo di `resolveLoomWindows`: il
+// collaudo passa finestre finte, senza compositore.
+export function projectFocusOutcome(projectId, loomRegistry, win = global.display.get_focus_window()) {
+    if (!loomRegistry.some(p => p.id === projectId)) return 'ignoto';
+    if (!win || !isPtyxisWindow(win)) return 'no';
+    const project = projectForTitle(win.get_title() ?? '', loomRegistry);
+    return project?.id === projectId ? 'si' : 'no';
 }
 
 // ── La tab di una conversazione ──────────────────────────────────────────────

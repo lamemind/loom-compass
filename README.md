@@ -91,6 +91,23 @@ gdbus call --session --dest org.lamemind.Compass --object-path /org/lamemind/Com
 
 Ogni focus scrive una riga `[Compass] focus <esito> <origine>` nel journal dello shell, con origine fra `riga`, `pinnata`, `vai`, `dbus`, `collaudo`. Gli esiti fuori dalla tab arrivano anche come banner, tranne su `FocusSession`: lì l'esito è nella risposta.
 
+## La finestra in focus è del progetto?
+
+`ProjectFocused` risponde se la finestra in focus è una finestra Ptyxis del progetto, riconosciuta dal titolo come nel menu (`<emoji> <name>` in testa al titolo della tab attiva). È di sola lettura: non cambia tab, finestra o desktop.
+
+```bash
+gdbus call --session --dest org.lamemind.Compass --object-path /org/lamemind/Compass \
+  --method org.lamemind.Compass.ProjectFocused "'<id del progetto>'"
+```
+
+| Esito | Significato |
+| --- | --- |
+| `si` | la finestra in focus è una finestra Ptyxis del progetto |
+| `no` | non lo è: un altro progetto, un'altra applicazione, nessuna finestra in focus |
+| `ignoto` | il progetto non è nel registry, compass non sa cosa cercare |
+
+Lo chiama il deck prima di aprire una tab chiesta da una conversazione: Ptyxis apre `--tab` nella sua finestra attiva, e sul `no` il deck rifiuta invece di aprire la tab nella finestra di un altro progetto. Ogni chiamata scrive una riga `[Compass] project-focused <esito> <id>` nel journal dello shell.
+
 ## Impostazioni
 
 La voce **Impostazioni**, in fondo al menu e fuori dalla zona che scorre, apre la finestra delle impostazioni dell'estensione (la stessa di `gnome-extensions prefs compass@lamemind`). La finestra elenca i progetti del registry nell'ordine del menu, con un interruttore ciascuno: spento = il progetto non ha una riga nel menu. Il cambio vale subito, senza reload.
