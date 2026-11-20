@@ -10,6 +10,7 @@
 //
 //     impl.js  →  {menu.js, dialog.js}  →  {model.js, desktop.js}
 //     impl.js  →  usage.js
+//     impl.js  →  focus-wait.js
 //
 //   model.js    il dato: registri, registro dei processi vivi, stato, rollup
 //   desktop.js  le finestre e i processi: match, focus, salto di tab,
@@ -17,6 +18,8 @@
 //   menu.js     i widget del popup: voce di menu, righe-sessione, bottoni surface
 //   dialog.js   il modale sulla conversazione in focus, e la sua risoluzione
 //   usage.js    il consumo dell'account in top bar: livelli, widget, mock
+//   focus-wait.js  l'attesa del focus di un progetto (`AwaitProjectFocus`):
+//               le attese aperte, la scadenza, l'ascolto del focus
 //
 // `prefs.js` (la finestra delle impostazioni) NON è nel grafo: la carica un
 // altro processo, il servizio `org.gnome.Shell.Extensions`, e importa il solo
@@ -66,6 +69,7 @@ const Desktop = await import('./desktop.js' + _Q);
 const Menu    = await import('./menu.js'    + _Q);
 const Dialog  = await import('./dialog.js'  + _Q);
 const Usage   = await import('./usage.js'   + _Q);
+const FocusWait = await import('./focus-wait.js' + _Q);
 
 // ── Scorciatoia globale ──────────────────────────────────────────────────────
 
@@ -148,6 +152,17 @@ const DBUS_INTERFACE_XML = `
       <arg type="s" name="project_id" direction="in"/>
       <arg type="s" name="esito"      direction="out"/>
     </method>
+    <!-- Aspetta che la finestra in focus diventi del progetto, e risponde in
+         quel momento: si, scaduta, interrotta, ignoto. Risponde si subito se lo
+         è già. Lo chiama il deck per uno spawn messo in coda (T229); avviso è
+         il testo della notifica dello spawn in attesa, scadenza_s la vita
+         della richiesta in coda. Il focus non lo sposta mai: lo porta l'utente. -->
+    <method name="AwaitProjectFocus">
+      <arg type="s" name="project_id" direction="in"/>
+      <arg type="s" name="avviso"     direction="in"/>
+      <arg type="u" name="scadenza_s" direction="in"/>
+      <arg type="s" name="esito"      direction="out"/>
+    </method>
   </interface>
 </node>`;
 
@@ -201,6 +216,16 @@ class CompassService {
     ProjectFocused(projectId) {
         return new GLib.Variant('(s)', [this._indicator.projectFocused(projectId)]);
     }
+
+    // T229 — la forma `…Async` e non una Promise: è l'unica in cui GJS passa
+    // l'invocazione, e dall'invocazione viene il chiamante da seguire sul bus
+    // (`awaitProjectFocus`). La risposta parte quando l'attesa si chiude, anche
+    // dopo minuti: GJS non la manda da sé, la manda `return_value`.
+    AwaitProjectFocusAsync([projectId, notice, deadlineS], invocation) {
+        this._indicator.awaitProjectFocus(projectId, notice, deadlineS,
+            invocation.get_connection(), invocation.get_sender(),
+            outcome => invocation.return_value(new GLib.Variant('(s)', [outcome])));
+    }
 }
 
 // ── Indicatore panel ─────────────────────────────────────────────────────────
@@ -253,6 +278,26 @@ class CompassIndicator extends PanelMenu.Button {
         // (~0,3 s) può risvegliarsi dopo un disable, e non deve toccare un
         // indicatore distrutto.
         this._alive              = true;
+        // T229 — le attese di `AwaitProjectFocus`, aperte dal deck per gli
+        // spawn in coda. L'ascolto del focus esiste solo mentre ce n'è almeno
+        // una (`onListening`): a zero attese nessun handler sul compositore.
+        this._unwatchFocus = null;
+        this._focusWaiters = new FocusWait.FocusWaiters({
+            outcomeOf:     id => Desktop.projectFocusOutcome(id, this._loomRegistry),
+            addTimeout:    (seconds, fn) => GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, seconds, () => {
+                fn();
+                return GLib.SOURCE_REMOVE;
+            }),
+            removeTimeout: id => GLib.source_remove(id),
+            onListening:   on => {
+                if (on) {
+                    this._unwatchFocus = FocusWait.watchFocus(global.display, () => this._focusWaiters.check());
+                } else {
+                    this._unwatchFocus?.();
+                    this._unwatchFocus = null;
+                }
+            },
+        });
 
         // ── Layout top-bar: [icona] [badge] [consumo account] ───────────────
         //
@@ -677,6 +722,47 @@ class CompassIndicator extends PanelMenu.Button {
         return outcome;
     }
 
+    // T229 — aspetta che la finestra in focus diventi del progetto `projectId`
+    // e chiama `reply(esito)` una volta sola, anche dopo minuti: il metodo
+    // D-Bus `AwaitProjectFocus`, esiti e ascolto in `focus-wait.js`.
+    //
+    // Il registry si rilegge su `ignoto`, come in `projectFocused`: un progetto
+    // registrato dopo l'ultima apertura del menu non deve chiudere l'attesa a
+    // torto.
+    //
+    // Il chiamante si segue sul bus: un deck che si chiude, o che uccide il
+    // suo `gdbus call` alla propria scadenza, sparisce dal bus, e l'attesa si
+    // chiude con lui (`abbandonata`) invece di restare aperta fino al focus.
+    // `bus_watch_name_on_connection` su un nome già sparito chiama subito la
+    // funzione di sparizione, quindi nemmeno il caso di un chiamante morto
+    // prima di questa riga resta aperto.
+    awaitProjectFocus(projectId, notice, deadlineS, connection, sender, reply) {
+        if (Desktop.projectFocusOutcome(projectId, this._loomRegistry) === 'ignoto')
+            this._loomRegistry = Model.loadLoomRegistry();
+        const done = outcome => {
+            log(`[Compass] await-focus ${outcome} ${projectId}`);
+            reply(outcome);
+        };
+        const waiter = this._focusWaiters.wait(projectId, deadlineS, done);
+        if (!waiter) return;
+        log(`[Compass] await-focus attesa ${projectId} ${deadlineS}s «${notice}»`);
+
+        if (connection && sender) {
+            const watchId = Gio.bus_watch_name_on_connection(connection, sender,
+                Gio.BusNameWatcherFlags.NONE, null,
+                () => this._focusWaiters.end(waiter, 'abbandonata'));
+            this._focusWaiters.onEnd(waiter, () => Gio.bus_unwatch_name(watchId));
+        }
+    }
+
+    // Chiude ogni attesa aperta con `interrotta`: compass si spegne o si
+    // ricarica, e un deck che aspetta deve saperlo subito — non al timeout del
+    // suo `gdbus call`, trenta minuti dopo. Va chiamata PRIMA di togliere il
+    // servizio dal bus: la risposta parte sulla connessione dello shell.
+    endFocusWaits() {
+        this._focusWaiters?.endAll('interrotta');
+    }
+
     // Banner della sorgente di compass, la stessa di «chiede conferma»: la
     // stessa estensione resta una voce sola nel centro notifiche.
     _focusNotice(outcome, project, name) {
@@ -723,6 +809,9 @@ class CompassIndicator extends PanelMenu.Button {
 
     destroy() {
         this._alive = false;
+        // Prima di tutto: una risposta e l'ascolto del focus scollegato, anche
+        // se `disable` l'ha già fatto (la seconda chiamata non trova attese).
+        this.endFocusWaits();
         // Il Gio.Settings sopravvive all'indicatore (lo tiene CompassImpl fino
         // al disable): senza disconnect, un cambio dalla finestra delle
         // impostazioni ricostruirebbe il menu di un attore già distrutto.
@@ -890,6 +979,9 @@ export class CompassImpl {
             Gio.bus_unown_name(this._ownNameId);
             this._ownNameId = null;
         }
+        // T229 — le attese aperte rispondono `interrotta` prima che il servizio
+        // esca dal bus: il deck che aspetta lo sa subito, e non apre la tab.
+        this._indicator?.endFocusWaits();
         if (this._dbusImpl) {
             this._dbusImpl.unexport();
             this._dbusImpl = null;

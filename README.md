@@ -26,6 +26,7 @@ Il cappello mostra **un solo** pallino, per **rollup** degli stati figli con pri
 | `compass@lamemind/extension.js` | **stub-loader** sottile: re-importa `impl.js` con cache-busting a ogni `enable()` |
 | `compass@lamemind/impl.js` | la logica vera (indicatore, menu, D-Bus, registry) |
 | `compass@lamemind/prefs.js` | la finestra delle impostazioni (GTK4/libadwaita, gira fuori dallo shell) |
+| `compass@lamemind/focus-wait.js` | l'attesa della finestra del progetto (`AwaitProjectFocus`): attese aperte, scadenza, ascolto del focus |
 | `compass@lamemind/ptyxis-tab.js` | helper di accessibilità (AT-SPI): porta davanti la tab di una conversazione, in un processo `gjs` a sé |
 | `compass@lamemind/schemas/` | schema GSettings dell'estensione + il suo compilato |
 | `bin/compass` | bridge CLI: hook di stato Claude → D-Bus + `reload` |
@@ -106,7 +107,25 @@ gdbus call --session --dest org.lamemind.Compass --object-path /org/lamemind/Com
 | `no` | non lo è: un altro progetto, un'altra applicazione, nessuna finestra in focus |
 | `ignoto` | il progetto non è nel registry, compass non sa cosa cercare |
 
-Lo chiama il deck prima di aprire una tab chiesta da una conversazione: Ptyxis apre `--tab` nella sua finestra attiva, e sul `no` il deck rifiuta invece di aprire la tab nella finestra di un altro progetto. Ogni chiamata scrive una riga `[Compass] project-focused <esito> <id>` nel journal dello shell.
+Lo chiama il deck prima di aprire una tab chiesta da una conversazione: Ptyxis apre `--tab` nella sua finestra attiva, e sul `no` il deck mette la richiesta in coda invece di aprire la tab nella finestra di un altro progetto. Ogni chiamata scrive una riga `[Compass] project-focused <esito> <id>` nel journal dello shell.
+
+## Aspettare la finestra del progetto
+
+`AwaitProjectFocus` aspetta che la finestra in focus diventi una finestra Ptyxis del progetto, e risponde in quel momento. Non sposta mai il focus: la finestra la porta davanti l'utente. Lo chiama il deck per uno spawn messo in coda, con il testo dell'avviso e la vita della richiesta in secondi.
+
+```bash
+gdbus call --session --dest org.lamemind.Compass --object-path /org/lamemind/Compass \
+  --method org.lamemind.Compass.AwaitProjectFocus '<id del progetto>' 'spawn in attesa: T219 preflight' 1800
+```
+
+| Esito | Quando |
+| --- | --- |
+| `si` | la finestra in focus è del progetto: subito, se lo è già, o al ritorno |
+| `scaduta` | sono passati i secondi della scadenza prima del focus |
+| `interrotta` | compass si è spento o ricaricato durante l'attesa |
+| `ignoto` | il progetto non è nel registry |
+
+Una finestra diventa del progetto in due modi, e l'attesa li ascolta entrambi: prende il focus, oppure è già in focus e l'utente passa a una tab del progetto, perché il titolo di una finestra Ptyxis è quello della sua tab attiva. compass ascolta il focus solo mentre almeno un'attesa è aperta, e segue il chiamante sul bus: un `gdbus call` che muore prima della risposta chiude la sua attesa. Ogni attesa scrive nel journal una riga all'apertura (`[Compass] await-focus attesa <id> <secondi>s «<avviso>»`) e una alla chiusura (`[Compass] await-focus <esito> <id>`, con `abbandonata` per il chiamante sparito).
 
 ## Impostazioni
 
