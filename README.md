@@ -125,6 +125,8 @@ gdbus call --session --dest org.lamemind.Compass --object-path /org/lamemind/Com
 | `interrotta` | compass si è spento o ricaricato durante l'attesa |
 | `ignoto` | il progetto non è nel registry |
 
+Mentre aspetta, compass mostra una notifica dello spawn in attesa: titolo l'etichetta del progetto, corpo l'avviso del deck, bottone **«Vai»** che porta davanti la finestra del progetto. Resta nel centro notifiche, senza suono, e compass la ritira quando l'attesa si chiude per qualunque via — focus arrivato col bottone o a mano, scadenza, chiamante sparito, spegnimento —, così non resta un «Vai» per uno spawn che non aspetta più. «Vai» trova una finestra solo se una finestra Ptyxis ha davanti una tab del progetto; altrimenti lo scrive nel journal e non fa niente.
+
 Una finestra diventa del progetto in due modi, e l'attesa li ascolta entrambi: prende il focus, oppure è già in focus e l'utente passa a una tab del progetto, perché il titolo di una finestra Ptyxis è quello della sua tab attiva. compass ascolta il focus solo mentre almeno un'attesa è aperta, e segue il chiamante sul bus: un `gdbus call` che muore prima della risposta chiude la sua attesa. Ogni attesa scrive nel journal una riga all'apertura (`[Compass] await-focus attesa <id> <secondi>s «<avviso>»`) e una alla chiusura (`[Compass] await-focus <esito> <id>`, con `abbandonata` per il chiamante sparito).
 
 ## Impostazioni

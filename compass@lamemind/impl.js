@@ -746,6 +746,7 @@ class CompassIndicator extends PanelMenu.Button {
         const waiter = this._focusWaiters.wait(projectId, deadlineS, done);
         if (!waiter) return;
         log(`[Compass] await-focus attesa ${projectId} ${deadlineS}s «${notice}»`);
+        this._focusWaiters.onEnd(waiter, this._showFocusWaitNotice(projectId, notice));
 
         if (connection && sender) {
             const watchId = Gio.bus_watch_name_on_connection(connection, sender,
@@ -753,6 +754,47 @@ class CompassIndicator extends PanelMenu.Button {
                 () => this._focusWaiters.end(waiter, 'abbandonata'));
             this._focusWaiters.onEnd(waiter, () => Gio.bus_unwatch_name(watchId));
         }
+    }
+
+    // T229 — la notifica dello spawn in attesa: titolo l'etichetta del
+    // progetto, corpo l'avviso che il deck passa («spawn in attesa: T219
+    // preflight»), bottone «Vai» che porta davanti la finestra del progetto col
+    // codice del «Vai» di «chiede conferma» sul canale senza `sessionId`. Il
+    // deck non può portare quel bottone: su Wayland un clic che torna al deck
+    // non sposta il focus, e solo compass, dentro Mutter, può farlo.
+    //
+    // Resta nel centro notifiche e non suona: l'utente la usa quando torna, non
+    // nell'istante in cui il deck la chiede. → la pulizia, che l'attesa chiama
+    // alla chiusura per qualunque via — focus arrivato anche a mano, scadenza,
+    // chiamante sparito, spegnimento —: nel centro notifiche non resta un «Vai»
+    // per uno spawn che non aspetta più.
+    //
+    // «Vai» trova una finestra solo se una finestra Ptyxis ha davanti una tab
+    // del progetto (`findNotificationWindow`); altrimenti lo scrive nel journal
+    // e non fa niente, come il «Vai» di «chiede conferma».
+    _showFocusWaitNotice(projectId, notice) {
+        const project = this._loomRegistry.find(p => p.id === projectId) ?? null;
+        const notification = this._newNotification(project?.label ?? projectId, notice);
+        let gone = false;
+        notification.connect('destroy', () => {
+            gone = true;
+        });
+        try {
+            notification.addAction('Vai', () => {
+                // `ts` qui, dentro l'evento del clic: vedi `_showNotification`.
+                const ts  = global.get_current_time();
+                const win = Desktop.findNotificationWindow(this._loomRegistry, project);
+                if (!win) {
+                    log(`[Compass] "Vai" spawn in attesa: nessuna finestra per ${projectId}`);
+                    return;
+                }
+                Desktop.focusWindow(win, ts);
+            });
+        } catch (_e) {}
+        this._getOrCreateSource().addNotification(notification);
+        return () => {
+            if (!gone) notification.destroy();
+        };
     }
 
     // Chiude ogni attesa aperta con `interrotta`: compass si spegne o si
