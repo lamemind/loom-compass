@@ -24,12 +24,23 @@ Il cappello mostra **un solo** pallino, per **rollup** degli stati figli con pri
 | --- | --- |
 | `compass@lamemind/` | l'estensione GNOME (UUID dir, installabile via symlink) |
 | `compass@lamemind/extension.js` | **stub-loader** sottile: re-importa `impl.js` con cache-busting a ogni `enable()` |
-| `compass@lamemind/impl.js` | la logica vera (indicatore, menu, D-Bus, registry) |
-| `compass@lamemind/prefs.js` | la finestra delle impostazioni (GTK4/libadwaita, gira fuori dallo shell) |
+| `compass@lamemind/impl.js` | la radice del grafo dei moduli: ciclo di vita e stato dell'indicatore, canale di stato, badge e suono, focus di una conversazione e di un progetto, cablaggio dei fratelli |
+| `compass@lamemind/model.js` | il dato: registri, registro dei processi vivi, stato per-sessione, rollup |
+| `compass@lamemind/desktop.js` | le finestre e i processi: match titolo → progetto, focus, salto di tab, coalescing, spawn, suono |
+| `compass@lamemind/menu.js` | i widget del popup: voce di progetto, righe-sessione, bottoni surface |
+| `compass@lamemind/dialog.js` | il modale sulla conversazione in focus (scorciatoia globale) |
+| `compass@lamemind/notify.js` | i banner in uscita, dalla sorgente unica di compass: «chiede conferma», spawn in attesa, esiti del focus, ripresa fallita |
+| `compass@lamemind/usage.js` | il consumo dell'account in top bar |
 | `compass@lamemind/focus-wait.js` | l'attesa della finestra del progetto (`AwaitProjectFocus`): attese aperte, scadenza, ascolto del focus |
+| `compass@lamemind/dbus.js` | il contratto D-Bus `org.lamemind.Compass`: l'XML e il servizio che inoltra ogni metodo all'indicatore |
+| `compass@lamemind/collaudo.js` | il collaudo del focus nella sessione reale, guidato da `$XDG_RUNTIME_DIR/compass-collaudo.json` |
+| `compass@lamemind/prefs.js` | la finestra delle impostazioni (GTK4/libadwaita, gira fuori dallo shell) |
 | `compass@lamemind/ptyxis-tab.js` | helper di accessibilità (AT-SPI): porta davanti la tab di una conversazione, in un processo `gjs` a sé |
 | `compass@lamemind/schemas/` | schema GSettings dell'estensione + il suo compilato |
 | `bin/compass` | bridge CLI: hook di stato Claude → D-Bus + `reload` |
+| `test/` | collaudi fuori dallo shell, uno per file: `gjs -m test/<nome>.test.js` |
+
+`impl.js` importa i fratelli, nessun fratello importa `impl.js`; il grafo e la ragione di ogni casella stanno nella testata di `impl.js`. `prefs.js` e `ptyxis-tab.js` girano in un altro processo e non sono nel grafo.
 
 **Perché lo stub-loader**: GNOME Shell tiene `extension.js` in cache nel module loader e non lo rilegge senza restart dello shell — che su Wayland significa **relogin**. Lo stub è un guscio che a ogni `enable()` importa `impl.js` con una
 query monotonic (`?v=…`): URL nuovo → il loader lo rilegge da disco. Risultato:
@@ -196,7 +207,7 @@ Il layer loom è la direzione: l'identità del progetto sta in un file committab
 
 ### Come compass legge dconf
 
-Via **CLI `dconf dump /org/lamemind/loom/`** (`impl.js`, `_dconfDump`), non via `DConf.Client`: il typelib GJS di DConf non è installato di default su Fedora Workstation, quindi l'introspezione non è disponibile. Conseguenza pratica:
+Via **CLI `dconf dump /org/lamemind/loom/`** (`model.js`, `dconfDump`), non via `DConf.Client`: il typelib GJS di DConf non è installato di default su Fedora Workstation, quindi l'introspezione non è disponibile. Conseguenza pratica:
 **niente `.watch()`** → nessuna notifica live sui cambi. Il registry viene
 riletto **all'apertura del menu**, che per un indicatore top-bar è indistinguibile dal live. Se un giorno il typelib entra tra le dipendenze, `DConf.Client` + signal `changed` è un drop-in che elimina la rilettura.
 

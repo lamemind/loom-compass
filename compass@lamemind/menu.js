@@ -672,7 +672,7 @@ export function pinnedRow(self, project, entry) {
                 },
                 ts,
                 findProjectWindow,
-                (reason) => self._resumeNotice(project, reason)
+                (reason) => self._notifier.resumeFailed(project, reason)
             );
         }));
     }
