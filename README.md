@@ -27,7 +27,8 @@ Il cappello mostra **un solo** pallino, per **rollup** degli stati figli con pri
 | `compass@lamemind/impl.js` | la radice del grafo dei moduli: ciclo di vita e stato dell'indicatore, canale di stato, badge e suono, focus di una conversazione e di un progetto, cablaggio dei fratelli |
 | `compass@lamemind/model.js` | il dato: registri, registro dei processi vivi, stato per-sessione, rollup |
 | `compass@lamemind/desktop.js` | le finestre e i processi: match titolo → progetto, focus, salto di tab, coalescing, spawn, suono |
-| `compass@lamemind/menu.js` | i widget del popup: voce di progetto, righe-sessione, bottoni surface |
+| `compass@lamemind/menu.js` | il popup e la voce di progetto: zona scorrevole, coda «Impostazioni», riga-cappello coi bottoni surface, rami espandibili |
+| `compass@lamemind/rows.js` | le righe delle conversazioni sotto il cappello, vive e pinnate: titolo-bottone, toggle 🚨 📌, contatore dei turni headless |
 | `compass@lamemind/dialog.js` | il modale sulla conversazione in focus (scorciatoia globale) |
 | `compass@lamemind/notify.js` | i banner in uscita, dalla sorgente unica di compass: «chiede conferma», spawn in attesa, esiti del focus, ripresa fallita |
 | `compass@lamemind/usage.js` | il consumo dell'account in top bar |

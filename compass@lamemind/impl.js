@@ -9,13 +9,16 @@
 // fratelli non lo importano mai — la dipendenza va in un verso solo:
 //
 //     impl.js  →  {menu.js, dialog.js}  →  {model.js, desktop.js}
+//     menu.js  →  rows.js  →  {model.js, desktop.js}
 //     impl.js  →  notify.js  →  desktop.js
 //     impl.js  →  {usage.js, focus-wait.js, dbus.js, collaudo.js}
 //
 //   model.js    il dato: registri, registro dei processi vivi, stato, rollup
 //   desktop.js  le finestre e i processi: match, focus, salto di tab,
 //               coalescing, spawn, suono
-//   menu.js     i widget del popup: voce di menu, righe-sessione, bottoni surface
+//   menu.js     il popup e la voce di progetto: zona scorrevole, coda
+//               «Impostazioni», riga-cappello, rami espandibili
+//   rows.js     le righe delle conversazioni sotto il cappello, vive e pinnate
 //   dialog.js   il modale sulla conversazione in focus, e la sua risoluzione
 //   notify.js   i banner in uscita, dalla sorgente unica di compass
 //   usage.js    il consumo dell'account in top bar: livelli, widget, mock
@@ -56,7 +59,7 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 // loader di GJS include nella chiave di cache → il file viene riletto da disco a
 // ogni enable(). La query NON si eredita: un `import './menu.js'` statico da
 // `impl.js?v=2` risolve a `menu.js` nudo, che resta in cache per tutta la vita
-// del processo gnome-shell. Con dieci file, `compass reload` ne ricaricherebbe
+// del processo gnome-shell. Con undici file, `compass reload` ne ricaricherebbe
 // uno — e il regime che ne esce è peggiore di «l'edit non prende»: impl nuovo che
 // parla con menu vecchio, un comportamento che non corrisponde a nessuna delle
 // due versioni, senza nessun errore a segnalarlo.
@@ -154,7 +157,7 @@ class CompassIndicator extends PanelMenu.Button {
         this._openSub            = null;
         // I banner in uscita. Il registry si passa come lambda e non come
         // array: l'indicatore riassegna il campo a ogni rilettura, e un «Vai»
-        // cliccato minuti dopo deve vedere quello corrente. `menu.js` ci
+        // cliccato minuti dopo deve vedere quello corrente. `rows.js` ci
         // arriva da `self._notifier` per il banner di una ripresa fallita.
         this._notifier = new Notify.Notifier({
             registry:     () => this._loomRegistry,
