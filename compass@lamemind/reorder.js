@@ -141,3 +141,206 @@ export function computeOrders(initial, finalIds) {
     }
     return changed;
 }
+
+// ── Riga `order` nel testo del file (puro) ───────────────────────────────────
+//
+// Cambia la sola cifra della riga `"order": N`; se la riga manca la aggiunge
+// subito dopo la riga `"name"`, con la stessa indentazione e la virgola in coda.
+// In entrambi i casi `git diff` mostra una riga sola. Mai una riscrittura con
+// JSON.stringify: riformatterebbe un file scritto a mano.
+//
+// Lancia un Error col motivo, senza toccare niente, quando:
+//   - il testo non è un oggetto JSON;
+//   - `order` c'è ma non su riga propria, o su più righe;
+//   - `order` manca e non c'è una e una sola riga `"name": "…",`;
+//   - il testo nuovo, riletto come JSON, differisce dal vecchio in una chiave
+//     diversa da `order` (la guardia contro un `order` annidato, per esempio).
+export function setOrderInText(text, order) {
+    if (!Number.isInteger(order)) throw new Error(`order non intero: ${order}`);
+
+    let before;
+    try {
+        before = JSON.parse(text);
+    } catch (e) {
+        throw new Error(`JSON invalido: ${e.message}`);
+    }
+    if (before === null || typeof before !== 'object' || Array.isArray(before))
+        throw new Error('il file non è un oggetto JSON');
+
+    const ORDER_LINE = /^(\s*"order"\s*:\s*)-?\d+(\s*,?\s*)$/;
+    const NAME_LINE  = /^(\s*)"name"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*$/;
+
+    const lines = text.split('\n');
+    const orderAt = lines.flatMap((l, i) => ORDER_LINE.test(l) ? [i] : []);
+    if (orderAt.length > 1) throw new Error('più di una riga "order"');
+
+    if (orderAt.length === 1) {
+        const i = orderAt[0];
+        lines[i] = lines[i].replace(ORDER_LINE, (_line, lead, trail) => `${lead}${order}${trail}`);
+    } else {
+        if (Object.hasOwn(before, 'order'))
+            throw new Error('"order" non sta su una riga propria');
+        const nameAt = lines.flatMap((l, i) => NAME_LINE.test(l) ? [i] : []);
+        if (nameAt.length !== 1)
+            throw new Error('nessuna riga "order" e nessuna riga "name" su riga propria');
+        const indent = lines[nameAt[0]].match(NAME_LINE)[1];
+        lines.splice(nameAt[0] + 1, 0, `${indent}"order": ${order},`);
+    }
+    const next = lines.join('\n');
+
+    const after = JSON.parse(next);
+    const withoutOrder = o => { const c = {...o}; delete c.order; return JSON.stringify(c); };
+    if (after.order !== order || withoutOrder(after) !== withoutOrder(before))
+        throw new Error('la modifica toccherebbe altre chiavi oltre a "order"');
+    return next;
+}
+
+// ── Scrittura (I/O) ──────────────────────────────────────────────────────────
+
+async function run(argv) {
+    try {
+        const proc = Gio.Subprocess.new(argv,
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+        const [stdout, stderr] = await proc.communicate_utf8_async(null, null);
+        return {ok: proc.get_successful(), status: proc.get_exit_status(),
+            stdout: stdout ?? '', stderr: (stderr ?? '').trim()};
+    } catch (e) {
+        return {ok: false, status: -1, stdout: '', stderr: e.message};
+    }
+}
+
+function readText(path) {
+    const [, bytes] = GLib.file_get_contents(path);
+    return new TextDecoder().decode(bytes);
+}
+
+// replace_contents passa da un file temporaneo e lo rinomina sopra il vecchio,
+// tenendone i permessi: un file a metà non esiste mai su disco.
+function writeText(path, text) {
+    Gio.File.new_for_path(path).replace_contents(new TextEncoder().encode(text),
+        null, false, Gio.FileCreateFlags.NONE, null);
+}
+
+function firstLine(s) {
+    return (s.split('\n').find(l => l.trim()) ?? '').trim();
+}
+
+// Legge, valida e prepara in memoria un progetto, senza scrivere niente.
+// Ritorna il piano, o un Error col motivo.
+async function prepare(project, order) {
+    const dir  = project.dir;
+    const path = GLib.build_filenamev([dir, CONFIG_REL]);
+    let oldText;
+    try {
+        oldText = readText(path);
+    } catch (e) {
+        throw new Error(`file illeggibile: ${e.message}`);
+    }
+    const newText = setOrderInText(oldText, order);
+    const declared = JSON.parse(oldText).id;
+    if (declared !== project.id)
+        throw new Error(`il file dichiara l'id «${declared}», il registry «${project.id}»`);
+
+    // Lo stato git si legge PRIMA di scrivere: dopo la scrittura il file
+    // differisce da HEAD in ogni caso.
+    //
+    // `git commit -- <file>` committa solo quel file anche con altro in stage,
+    // ma lo committa intero: se il file ha già altre modifiche oltre a `order`,
+    // entrerebbero nel commit. In quel caso si scrive e non si committa.
+    let noCommit = null;
+    const tracked = await run(['git', '-C', dir, 'ls-files', '--error-unmatch', '--', CONFIG_REL]);
+    if (!tracked.ok) {
+        noCommit = 'file non versionato: scritto, nessun commit';
+    } else {
+        const diff = await run(['git', '-C', dir, 'diff', '--quiet', 'HEAD', '--', CONFIG_REL]);
+        if (diff.status === 1)
+            noCommit = 'altre modifiche non committate nel file: scritto, nessun commit';
+        else if (!diff.ok)
+            noCommit = `stato git illeggibile, nessun commit: ${firstLine(diff.stderr)}`;
+    }
+    return {project, order, path, oldText, newText, noCommit};
+}
+
+// Esito per progetto, uno per ogni voce della mappa:
+//   {id, name, order, written, committed, note, error}
+// `note` è un caso senza commit (file non versionato, altre modifiche);
+// `error` un fallimento. `aborted` vale true quando nessun file è stato
+// scritto perché un progetto non si poteva preparare.
+//
+// Tre fasi, nell'ordine:
+//   1. prepara tutti: un file illeggibile o invalido annulla l'applicazione
+//      intera, nessun file e nessun valore dconf. `refresh.sh` salta un file
+//      invalido, quindi in una rinumerazione scritta a metà quel progetto
+//      resterebbe col numero vecchio in mezzo ai nuovi.
+//   2. file e dconf, progetto per progetto. Se dconf fallisce il file torna al
+//      testo di prima, e l'applicazione si ferma: i progetti già scritti hanno
+//      file e dconf concordi, quelli dopo non sono toccati.
+//   3. commit dei progetti scritti. Un commit fallito non disfa niente: file e
+//      dconf concordano già.
+export async function applyOrders(projects, orders) {
+    const byId = new Map(projects.map(p => [p.id, p]));
+    const results = new Map();
+    for (const [id, order] of orders) {
+        results.set(id, {id, name: byId.get(id)?.name ?? id, order,
+            written: false, committed: false, note: null, error: null});
+    }
+
+    const plans = [];
+    for (const [id, order] of orders) {
+        const project = byId.get(id);
+        try {
+            if (!project) throw new Error('progetto non nel registry');
+            plans.push(await prepare(project, order));
+        } catch (e) {
+            results.get(id).error = e.message;
+        }
+    }
+    if ([...results.values()].some(r => r.error))
+        return {aborted: true, results: [...results.values()]};
+
+    const written = [];
+    let stoppedBy = null;
+    for (const plan of plans) {
+        const r = results.get(plan.project.id);
+        if (stoppedBy) {
+            r.error = `non scritto: applicazione interrotta su ${stoppedBy}`;
+            continue;
+        }
+        try {
+            writeText(plan.path, plan.newText);
+        } catch (e) {
+            r.error = `scrittura del file fallita: ${e.message}`;
+            stoppedBy = r.name;
+            continue;
+        }
+        const key = `${REGISTRY_PROJECTS}/${plan.project.id}/order`;
+        const dconf = await run(['dconf', 'write', key, String(plan.order)]);
+        if (!dconf.ok) {
+            r.error = `scrittura dconf fallita: ${firstLine(dconf.stderr) || `uscita ${dconf.status}`}`;
+            try {
+                writeText(plan.path, plan.oldText);
+            } catch (e) {
+                r.error += ` — e il file non è tornato al testo di prima: ${e.message}`;
+            }
+            stoppedBy = r.name;
+            continue;
+        }
+        r.written = true;
+        written.push(plan);
+    }
+
+    for (const plan of written) {
+        const r = results.get(plan.project.id);
+        if (plan.noCommit) {
+            r.note = plan.noCommit;
+            continue;
+        }
+        const commit = await run(['git', '-C', plan.project.dir, 'commit', '-q',
+            '-m', `compass: order ${plan.project.id} → ${plan.order}`, '--', CONFIG_REL]);
+        if (commit.ok)
+            r.committed = true;
+        else
+            r.error = `commit fallito: ${firstLine(commit.stderr || commit.stdout) || `uscita ${commit.status}`}`;
+    }
+    return {aborted: false, results: [...results.values()]};
+}

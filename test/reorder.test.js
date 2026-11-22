@@ -147,3 +147,84 @@ print('ok - spostamento singolo con interi liberi: al più un progetto cambia nu
 
 throws(() => computeOrders(REGISTRY, ['money']), 'ordine finale incompleto → errore');
 throws(() => computeOrders(list([['a', 1], ['b', 2]]), ['a', 'a']), 'id ripetuto nell\'ordine finale → errore');
+
+// ── setOrderInText: la sola riga `order` cambia ──────────────────────────────
+
+const {setOrderInText} = Reorder;
+
+// Righe diverse fra due testi, come le conterebbe `git diff`: una sostituzione
+// vale una riga, un'aggiunta una riga.
+function changedLines(a, b) {
+    const x = a.split('\n'), y = b.split('\n');
+    if (x.length === y.length) return x.filter((l, i) => l !== y[i]).length;
+    const [short, long] = x.length < y.length ? [x, y] : [y, x];
+    let i = 0;
+    while (i < short.length && short[i] === long[i]) i++;
+    return short.slice(i).every((l, k) => l === long[i + 1 + k]) ? long.length - short.length : -1;
+}
+
+// Forma di loom-works: `order` in mezzo, con la virgola.
+const MIDDLE = `{
+  "id": "loom-works",
+  "emoji": "🧵",
+  "owner": "LOCAL",
+  "name": "loom-works",
+  "surfaces": {
+    "claude": true,
+    "deck": true
+  },
+  "order": 50,
+  "archivableDays": 30
+}
+`;
+const middle = setOrderInText(MIDDLE, 51);
+eq(middle.includes('  "order": 51,\n'), true, 'order in mezzo: cifra cambiata, virgola tenuta');
+eq(changedLines(MIDDLE, middle), 1, 'order in mezzo: una riga di diff');
+
+// Forma di factory: `order` ultima chiave, senza virgola.
+const LAST = `{
+  "id": "factory",
+  "emoji": "🏭",
+  "owner": "LAMEMIND",
+  "name": "factory",
+  "surfaces": { "claude": true, "deck": true },
+  "order": 52
+}
+`;
+const last = setOrderInText(LAST, 6);
+eq(last.includes('  "order": 6\n}'), true, 'order in coda: cifra cambiata, nessuna virgola aggiunta');
+eq(changedLines(LAST, last), 1, 'order in coda: una riga di diff');
+
+// Forma di vinted: niente `order`, la riga entra dopo `name`.
+const ABSENT = `{
+  "id": "vinted",
+  "emoji": "🛍️",
+  "owner": "LAMEMIND",
+  "name": "vinted",
+  "surfaces": { "claude": true, "deck": true },
+  "launch": [
+    { "emoji": "📝", "label": "codium", "command": "codium ." }
+  ],
+  "defaultSurface": "deck",
+  "permissionMode": "auto"
+}
+`;
+const added = setOrderInText(ABSENT, 80);
+eq(added.split('\n')[5], '  "order": 80,', 'order assente: riga aggiunta subito dopo name, stessa indentazione');
+eq(changedLines(ABSENT, added), 1, 'order assente: una riga di diff');
+eq(JSON.parse(added).order, 80, 'order assente: il file resta JSON valido');
+
+eq(setOrderInText(MIDDLE.replace(/\n/g, '\r\n'), 51).includes('"order": 51,\r\n'), true,
+    'fine riga CRLF tenuta');
+
+throws(() => setOrderInText('{"id": "x", "name": "x", "surfaces": {}}', 10),
+    'JSON su una riga sola → errore, nessuna scrittura');
+throws(() => setOrderInText('{\n  "id": "x",\n  "name": "x",\n', 10), 'JSON invalido → errore');
+throws(() => setOrderInText('[\n  1\n]', 10), 'JSON non oggetto → errore');
+throws(() => setOrderInText(MIDDLE, 5.5), 'order non intero → errore');
+throws(() => setOrderInText('{\n  "id": "x",\n  "name": "x",\n  "surfaces": {}, "order": 5\n}', 10),
+    'order non su riga propria → errore');
+throws(() => setOrderInText('{\n  "id": "x",\n  "name": "x"\n}', 10),
+    'order assente e name senza virgola (ultima chiave) → errore');
+throws(() => setOrderInText('{\n  "id": "x",\n  "name": "x",\n  "launch": {\n    "order": 3\n  }\n}', 10),
+    'order annidato preso per quello di primo livello → errore della guardia');
