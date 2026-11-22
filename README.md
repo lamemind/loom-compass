@@ -36,12 +36,13 @@ Il cappello mostra **un solo** pallino, per **rollup** degli stati figli con pri
 | `compass@lamemind/dbus.js` | il contratto D-Bus `org.lamemind.Compass`: l'XML e il servizio che inoltra ogni metodo all'indicatore |
 | `compass@lamemind/collaudo.js` | il collaudo del focus nella sessione reale, guidato da `$XDG_RUNTIME_DIR/compass-collaudo.json` |
 | `compass@lamemind/prefs.js` | la finestra delle impostazioni (GTK4/libadwaita, gira fuori dallo shell) |
+| `compass@lamemind/reorder.js` | il riordino dei progetti dalla finestra delle impostazioni: calcolo dei numeri `order`, riga del file di progetto, copia in dconf, commit |
 | `compass@lamemind/ptyxis-tab.js` | helper di accessibilità (AT-SPI): porta davanti la tab di una conversazione, in un processo `gjs` a sé |
 | `compass@lamemind/schemas/` | schema GSettings dell'estensione + il suo compilato |
 | `bin/compass` | bridge CLI: hook di stato Claude → D-Bus + `reload` |
 | `test/` | collaudi fuori dallo shell, uno per file: `gjs -m test/<nome>.test.js` |
 
-`impl.js` importa i fratelli, nessun fratello importa `impl.js`; il grafo e la ragione di ogni casella stanno nella testata di `impl.js`. `prefs.js` e `ptyxis-tab.js` girano in un altro processo e non sono nel grafo.
+`impl.js` importa i fratelli, nessun fratello importa `impl.js`; il grafo e la ragione di ogni casella stanno nella testata di `impl.js`. `prefs.js` (con `reorder.js`, importato solo da lui) e `ptyxis-tab.js` girano in un altro processo e non sono nel grafo.
 
 **Perché lo stub-loader**: GNOME Shell tiene `extension.js` in cache nel module loader e non lo rilegge senza restart dello shell — che su Wayland significa **relogin**. Lo stub è un guscio che a ogni `enable()` importa `impl.js` con una
 query monotonic (`?v=…`): URL nuovo → il loader lo rilegge da disco. Risultato:
@@ -143,13 +144,48 @@ Una finestra diventa del progetto in due modi, e l'attesa li ascolta entrambi: p
 
 ## Impostazioni
 
-La voce **Impostazioni**, in fondo al menu e fuori dalla zona che scorre, apre la finestra delle impostazioni dell'estensione (la stessa di `gnome-extensions prefs compass@lamemind`). La finestra elenca i progetti del registry nell'ordine del menu, con un interruttore ciascuno: spento = il progetto non ha una riga nel menu. Il cambio vale subito, senza reload.
+La voce **Impostazioni**, in fondo al menu e fuori dalla zona che scorre, apre la finestra delle impostazioni dell'estensione (la stessa di `gnome-extensions prefs compass@lamemind`). La finestra elenca i progetti del registry nell'ordine del menu, con un interruttore e due frecce ↑/↓ ciascuno. Spento = il progetto non ha una riga nel menu; il cambio vale subito, senza reload.
 
 Nascondere un progetto toglie **solo la sua riga dal menu**. Badge in top bar, suono, notifica «Vai» e modale sulla conversazione in focus lo trattano come ogni altro progetto: il badge può quindi mostrare l'emoji di un progetto che nel menu non c'è. Con tutti i progetti nascosti il menu mostra `— tutti i progetti sono nascosti —`, non `— registry vuoto —`.
 
+### Riordinare i progetti
+
+Le frecce spostano le righe della finestra, e basta: niente si scrive finché non si preme **Applica**, nella testata del gruppo. Applica è spento finché le righe sono nell'ordine salvato. Chiudere la finestra con spostamenti non applicati li scarta, senza conferma. I progetti nascosti stanno nella lista e contano come vicini.
+
+L'ordine del menu viene dal campo `order` del `.claude/loom-works.json` di ogni progetto; il registry dconf ne tiene una copia, che `refresh.sh` riscrive dal file. Per questo Applica, per ogni progetto che cambia numero:
+
+1. scrive il nuovo `order` nel file di progetto: cambia solo la cifra della riga `"order": N`, o aggiunge quella riga subito dopo la riga `"name"` quando manca. `git diff` mostra una riga sola, e il resto del file resta com'è;
+2. scrive la stessa cifra in `/org/lamemind/loom/projects/<id>/order`;
+3. committa il solo file nel repo del progetto, sul ramo corrente: `git commit -- .claude/loom-works.json`, messaggio `compass: order <id> → <N>`. Altri file in stage restano in stage.
+
+**Compass non pusha.** Il commit resta locale finché non pushi tu quel repo: `git push` pubblicherebbe tutti i commit che il ramo ha in più del remote, non il solo commit di compass.
+
+Il menu legge il registry a ogni apertura: l'ordine nuovo compare alla prossima, senza reload.
+
+**Quali progetti cambiano numero.** Il minimo: ogni numero cambiato è un commit in un repo diverso. I numeri si calcolano sull'ordine finale delle righe, non sulla strada dei clic. Restano fermi quanti più progetti numerati si può; gli altri prendono un intero fra i due vicini, o l'ultimo numero più 10 in coda. Esempi:
+
+| Ordine di partenza | Spostamento | Cambia |
+| --- | --- | --- |
+| loom-works 50, factory 52, money 60 | money fra loom-works e factory | money → 51 |
+| 50, 51, 52, 60 | il 52 sopra il 51 | il 51 → 56: un vicino, non il progetto spostato |
+| money 60, accollo (senza `order`), cc-host 70 | cc-host sotto accollo | accollo → 65 |
+
+Il progetto che cambia numero può quindi essere un vicino di quello spostato, e il commit cade nel suo repo. A parità di costo resta fermo il progetto più in alto. I progetti senza `order` che chiudono la lista in ordine alfabetico restano senza; ogni altro progetto senza `order` prende un numero. Tutti a passi di 10 solo quando nessun numero si può tenere.
+
+**Quando non si committa.** Il file viene scritto (file e dconf restano concordi) ma non committato in due casi, detti nel sottotitolo della riga del progetto:
+
+| Caso | Perché |
+| --- | --- |
+| file non versionato | non c'è niente da committare |
+| il file ha altre modifiche non committate | `git commit -- <file>` committa il file intero: le altre modifiche entrerebbero nel commit di compass |
+
+**Quando non si scrive niente.** Prima di scrivere, Applica legge e prepara tutti i file. Un file illeggibile, un JSON invalido, un id diverso da quello del registry o un file senza le righe `"order"` o `"name"` su riga propria annullano l'applicazione intera: nessun file, nessun valore dconf. Le righe restano dove le hai messe, e Applica resta acceso. Se la scrittura in dconf fallisce, il file di quel progetto torna al testo di prima e l'applicazione si ferma; un commit fallito non disfa niente. Ogni errore compare nel sottotitolo della riga del suo progetto, al posto del percorso, finché la finestra è aperta; un toast riassume l'esito.
+
+Il codice sta in `reorder.js`; `gjs -m test/reorder.test.js` collauda il calcolo dei numeri e la modifica della riga.
+
 ### Chiavi dconf
 
-Le preferenze stanno nello schema GSettings dell'estensione, `org.gnome.shell.extensions.compass`, sotto `/org/gnome/shell/extensions/compass/`. Sono preferenze di **questa macchina**: il registry `/org/lamemind/loom/` descrive i progetti e lo scrive `loom-works init`, compass lo legge soltanto e non ci aggiunge niente.
+Le preferenze stanno nello schema GSettings dell'estensione, `org.gnome.shell.extensions.compass`, sotto `/org/gnome/shell/extensions/compass/`. Sono preferenze di **questa macchina**: il registry `/org/lamemind/loom/` descrive i progetti e lo scrive `loom-works init`. Compass ci scrive un campo solo, `order`, da Applica e sempre insieme al file di progetto da cui `refresh.sh` lo ricopia.
 
 | Chiave | Tipo | Default | Cosa |
 | --- | --- | --- | --- |
@@ -198,7 +234,7 @@ L'estensione legge i progetti da **due** sorgenti, in ordine:
 | | `projects.json` (legacy) | registry dconf (loom) |
 | --- | --- | --- |
 | Dove | `compass@lamemind/projects.json` | `/org/lamemind/loom/projects/<id>/` |
-| Chi scrive | `compass add` (rimosso da questo repo) | `loom-works init` (loom-works-plugin) |
+| Chi scrive | `compass add` (rimosso da questo repo) | `loom-works init` e `refresh.sh` (loom-works-plugin); il solo `order` anche la finestra delle impostazioni |
 | Stato | in dismissione | **corrente** |
 | Versionato | ❌ gitignorato (path di lavoro + UUID locali) | — (per-macchina) |
 

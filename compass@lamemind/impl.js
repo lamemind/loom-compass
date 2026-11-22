@@ -29,8 +29,10 @@
 //   collaudo.js il collaudo del focus nella sessione reale, da un file
 //
 // `prefs.js` (la finestra delle impostazioni) NON è nel grafo: la carica un
-// altro processo, il servizio `org.gnome.Shell.Extensions`, e importa il solo
-// model.js. Con lo shell parla attraverso lo schema GSettings, non per import.
+// altro processo, il servizio `org.gnome.Shell.Extensions`, e importa i soli
+// model.js e reorder.js (il riordino dei progetti, importato solo da lui). Con
+// lo shell parla attraverso lo schema GSettings e il campo `order` del registry
+// dconf, che il menu rilegge a ogni apertura, non per import.
 // Fuori dal grafo anche `ptyxis-tab.js`: è un processo `gjs` a sé, che
 // desktop.js lancia e non importa.
 //
