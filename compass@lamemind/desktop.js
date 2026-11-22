@@ -200,7 +200,7 @@ export async function windowWithTitle(title) {
 //  2. Altrimenti la finestra del progetto, la stessa del bottone-nome: la
 //     conversazione è una tab là dentro, ma non quella davanti.
 //
-// `null` quando non c'è né l'una né l'altra (worktree lane, claude lanciato
+// `null` quando non c'è né l'una né l'altra (worktree git sorello, claude lanciato
 // fuori da Ptyxis, progetto ignoto).
 export function windowForSession(names, project, loomRegistry) {
     const wins  = getPtyxisWindows();

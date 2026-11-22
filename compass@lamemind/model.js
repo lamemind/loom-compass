@@ -493,11 +493,11 @@ export function pruneSessionStates(channels, liveSessions) {
 // Il registro vivo non porta l'identità del progetto: l'unico aggancio è il
 // `cwd`, confrontato con la `dir` del registry dconf — uguale o discendente.
 // Copre le sessioni spawnate da deck e compass (partono a project root) e chi
-// lancia `claude` in una sottocartella. NON copre i worktree lane, che sono
-// directory SORELLE `{project}-{lane}`: prenderli richiederebbe un
-// `git worktree list` per progetto a ogni apertura del menu, e un match per
-// prefisso di nome non è praticabile (`loom-works-plugin` comincia per
-// `loom-works-` e non è una lane).
+// lancia `claude` in una sottocartella. NON copre i worktree git aperti
+// accanto al progetto, che sono directory SORELLE (`{project}-<nome>`):
+// prenderli richiederebbe un `git worktree list` per progetto a ogni apertura
+// del menu, e un match per prefisso di nome non è praticabile
+// (`loom-works-plugin` comincia per `loom-works-` e non è un worktree).
 //
 // Ordine per `startedAt`, non per urgenza: le righe devono stare ferme fra
 // due aperture del menu, o si clicca su quella sbagliata.

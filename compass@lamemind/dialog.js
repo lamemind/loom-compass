@@ -83,11 +83,12 @@ const Desktop = await import('./desktop.js' + _Q);
 //     modale, e l'azione qui è sulla conversazione DAVANTI a te;
 //   - una o N sessioni → il bersaglio, da disambiguare se più di una.
 //
-// Le conversazioni dei worktree lane restano fuori, e non per una svista del
-// filtro: `sessionsForProject` scarta i `cwd` fuori da `project.dir`, e una lane
-// è una directory sorella. Anche includendola, il sidecar che il deck di quella
-// lane legge sta sotto la root della lane — una scrittura keyed sul progetto
-// finirebbe in un file che nessun lettore della lane apre.
+// Le conversazioni di un worktree git sorello restano fuori, e non per una
+// svista del filtro: `sessionsForProject` scarta i `cwd` fuori da `project.dir`,
+// e un worktree aperto accanto al progetto è una directory sorella. Anche
+// includendolo, il sidecar che il deck di quel worktree legge sta sotto la sua
+// root — una scrittura keyed sul progetto finirebbe in un file che nessun
+// lettore del worktree apre.
 export function focusedSessions(
     loomRegistry, liveSessions, win = global.display.get_focus_window()
 ) {
