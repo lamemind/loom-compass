@@ -393,7 +393,7 @@ export function twinTitle(base, requestedNames) {
 // scrivesse non deve svuotare il menu.
 //
 // GEMELLA di `processClass` in `loom-deck/src/live-sessions.ts` e di
-// `process_class` in `loom-works-plugin/scripts/regia/regia_common.py`: tre
+// `process_class` in `loom-works-plugin/scripts/orchestrator/orchestrator_common.py`: tre
 // copie in tre linguaggi, nessuna importa le altre, e una regola cambiata in
 // una sola fa vedere due registri diversi senza errore.
 export function registryClass(s) {

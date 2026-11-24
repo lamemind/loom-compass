@@ -528,7 +528,7 @@ export function fillLoomHeader(self, item, project, wins, sessions = [], headles
     row.add_child(nameBtn);
 
     // T206/D1 — `◐N`: i turni headless (`claude -p`) in corso del progetto.
-    // Senza, la top bar direbbe «fermo» mentre la regia ha tre turni al lavoro:
+    // Senza, la top bar direbbe «fermo» mentre l'orchestrator ha tre turni al lavoro:
     // un turno headless non annuncia stati e non entra nel rollup del dot.
     // Etichetta e non bottone: non c'è una tab a cui portare, e un clic che
     // non fa niente sarebbe da spiegare.
